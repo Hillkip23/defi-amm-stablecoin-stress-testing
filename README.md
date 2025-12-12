@@ -1,3 +1,12 @@
+🔗 **Live dashboards**
+
+- **AMM & Stablecoin Stress Testing Dashboard**  
+  https://defi-amm-stablecoin-stress-testing-ykubq3cknumnygyjttmmxc.streamlit.app/
+
+- **Stablecoin-Focused Stress Testing Dashboard**  
+  https://hillkip23-defi-amm-stablecoin-stress-t-appstablecoin-app-yfedl4.streamlit.app/
+
+
 # DeFi AMM & Stablecoin Stress Testing
 
 A Python framework and interactive Streamlit dashboard for **stress testing
