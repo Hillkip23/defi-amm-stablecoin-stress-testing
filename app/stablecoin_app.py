@@ -8,6 +8,19 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+import sys
+from pathlib import Path
+
+# Ensure src/ is on the Python path (works locally and on Streamlit Cloud)
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.append(str(ROOT / "src"))
+
+
+
+# Ensure src/ is on the Python path (works locally and on Streamlit Cloud)
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.append(str(ROOT / "src"))
+
 from defi_risk.simulation import simulate_gbm_price_paths, compute_lp_vs_hodl
 from defi_risk.amm_pricing import impermanent_loss, lp_over_hodl_univ3, slippage_vs_trade_fraction
 from defi_risk.peg_models import simulate_ou_peg_paths
