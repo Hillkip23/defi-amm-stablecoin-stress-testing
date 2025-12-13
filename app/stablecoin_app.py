@@ -612,19 +612,6 @@ else:
 
 
 
-import matplotlib.pyplot as plt
-import numpy as np
-import pandas as pd
-import streamlit as st
-
-from defi_risk.stablecoin import (
-    simulate_mean_reverting_peg,
-    slippage_curve,
-    constant_product_slippage,
-)
-
-
-# ... your existing code above ...
 
 
 # =====================================================
@@ -646,6 +633,7 @@ Use the tabs below to explore:
 """
 )
 
+
 # Small helpers specific to this section
 def simulate_ou_cached(n_paths, n_steps, T, kappa, sigma, p0, peg, seed):
     return simulate_ou_peg_paths(
@@ -659,6 +647,104 @@ def simulate_ou_cached(n_paths, n_steps, T, kappa, sigma, p0, peg, seed):
         random_seed=seed,
     )
 
+
+def simulate_ou_stress_aware(
+    n_paths: int,
+    n_steps: int,
+    T: float,
+    kappa: float,
+    sigma: float,
+    p0: float,
+    peg: float,
+    seed: int,
+    stress_mult: float = 3.0,
+    stress_band: float = 0.01,
+) -> pd.DataFrame:
+    """
+    OU with volatility that increases when the peg is stressed.
+
+    - Near the peg (|p - peg| small) → volatility ~ sigma
+    - As deviation approaches `stress_band` (e.g. 1%) → volatility ramps up
+      towards `stress_mult * sigma`.
+    """
+    if seed is not None:
+        np.random.seed(seed)
+
+    dt = T / n_steps
+    times = np.linspace(0.0, T, n_steps + 1)
+    prices = np.zeros((n_steps + 1, n_paths), dtype=float)
+    prices[0, :] = p0
+
+    for t in range(1, n_steps + 1):
+        z = np.random.normal(size=n_paths)
+        prev = prices[t - 1, :]
+
+        deviation = np.abs(prev - peg)
+        # 0 → 1 as deviation goes from 0 to stress_band
+        stress_level = np.clip(deviation / stress_band, 0.0, 1.0)
+        sigma_t = sigma * (1.0 + (stress_mult - 1.0) * stress_level)
+
+        drift = kappa * (peg - prev) * dt
+        diffusion = sigma_t * np.sqrt(dt) * z
+        prices[t, :] = prev + drift + diffusion
+
+    df = pd.DataFrame(prices, index=times)
+    df.index.name = "time"
+    return df
+
+
+def simulate_ou_with_jumps(
+    n_paths: int,
+    n_steps: int,
+    T: float,
+    kappa: float,
+    sigma: float,
+    p0: float,
+    peg: float,
+    seed: int,
+    jump_intensity: float = 1.0,   # ~1 jump per year
+    jump_mean: float = -0.02,      # average 2% downward jump
+    jump_std: float = 0.01,        # jump size variability
+) -> pd.DataFrame:
+    """
+    OU with occasional jump shocks:
+
+        dp_t = kappa(peg - p_t) dt + sigma dW_t + J_t
+
+    where J_t is a jump term occurring with Poisson intensity `jump_intensity`
+    and normally-distributed jump size.
+    """
+    if seed is not None:
+        np.random.seed(seed)
+
+    dt = T / n_steps
+    times = np.linspace(0.0, T, n_steps + 1)
+    prices = np.zeros((n_steps + 1, n_paths), dtype=float)
+    prices[0, :] = p0
+
+    for t in range(1, n_steps + 1):
+        z = np.random.normal(size=n_paths)
+        prev = prices[t - 1, :]
+
+        drift = kappa * (peg - prev) * dt
+        diffusion = sigma * np.sqrt(dt) * z
+
+        # Bernoulli approximation to Poisson(λ dt)
+        jump_prob = jump_intensity * dt
+        jump_mask = np.random.rand(n_paths) < jump_prob
+        jump_sizes = np.zeros(n_paths)
+        if jump_mask.any():
+            jump_sizes[jump_mask] = np.random.normal(
+                loc=jump_mean,
+                scale=jump_std,
+                size=jump_mask.sum(),
+            )
+
+        prices[t, :] = prev + drift + diffusion + jump_sizes
+
+    df = pd.DataFrame(prices, index=times)
+    df.index.name = "time"
+    return df
 
 
 def load_grid_csv():
@@ -685,6 +771,14 @@ with tab1:
 
     with col_left:
         st.subheader("Peg Dynamics Parameters")
+
+        peg_model = st.selectbox(
+            "Peg model",
+            ["Basic OU", "Stress-aware OU", "OU with jumps"],
+            index=0,
+            key="peg_model",
+        )
+
         n_paths_peg = st.slider("Number of OU paths", 200, 5000, 1000, key="peg_n_paths")
         n_steps_peg = st.slider("Steps per path (peg)", 50, 365, 252, key="peg_n_steps")
         T_peg = st.slider("Horizon (years)", 0.1, 2.0, 1.0, key="peg_T")
@@ -697,10 +791,18 @@ with tab1:
     with col_right:
         st.subheader("AMM Pool & Trade Stress")
         reserve_stable = st.number_input(
-            "Stablecoin reserve in pool", 100_000.0, 100_000_000.0, 10_000_000.0, step=100_000.0
+            "Stablecoin reserve in pool",
+            100_000.0,
+            100_000_000.0,
+            10_000_000.0,
+            step=100_000.0,
         )
         reserve_collateral = st.number_input(
-            "Collateral reserve in pool", 100_000.0, 100_000_000.0, 10_000_000.0, step=100_000.0
+            "Collateral reserve in pool",
+            100_000.0,
+            100_000_000.0,
+            10_000_000.0,
+            step=100_000.0,
         )
         max_trade_pct = st.slider(
             "Max trade size as % of reserves", 1.0, 50.0, 20.0, key="peg_max_trade"
@@ -712,16 +814,51 @@ with tab1:
     run_peg = st.button("Run stablecoin scenario")
 
     if run_peg:
-        prices_peg = simulate_ou_cached(
-            n_paths=n_paths_peg,
-            n_steps=n_steps_peg,
-            T=T_peg,
-            kappa=kappa_peg,
-            sigma=sigma_peg,
-            p0=p0_peg,
-            peg=peg_target,
-            seed=seed_peg,
-        )
+        if peg_model == "Basic OU":
+            prices_peg = simulate_ou_cached(
+                n_paths=n_paths_peg,
+                n_steps=n_steps_peg,
+                T=T_peg,
+                kappa=kappa_peg,
+                sigma=sigma_peg,
+                p0=p0_peg,
+                peg=peg_target,
+                seed=seed_peg,
+            )
+        elif peg_model == "Stress-aware OU":
+            prices_peg = simulate_ou_stress_aware(
+                n_paths=n_paths_peg,
+                n_steps=n_steps_peg,
+                T=T_peg,
+                kappa=kappa_peg,
+                sigma=sigma_peg,
+                p0=p0_peg,
+                peg=peg_target,
+                seed=seed_peg,
+            )
+        elif peg_model == "OU with jumps":
+            prices_peg = simulate_ou_with_jumps(
+                n_paths=n_paths_peg,
+                n_steps=n_steps_peg,
+                T=T_peg,
+                kappa=kappa_peg,
+                sigma=sigma_peg,
+                p0=p0_peg,
+                peg=peg_target,
+                seed=seed_peg,
+            )
+        else:
+            # Fallback (shouldn't happen)
+            prices_peg = simulate_ou_cached(
+                n_paths=n_paths_peg,
+                n_steps=n_steps_peg,
+                T=T_peg,
+                kappa=kappa_peg,
+                sigma=sigma_peg,
+                p0=p0_peg,
+                peg=peg_target,
+                seed=seed_peg,
+            )
 
         ou_probs = depeg_probabilities(prices_peg, thresholds=(0.99, 0.95, 0.90))
 
@@ -752,13 +889,18 @@ with tab1:
             for thr in (0.99, 0.95, 0.90):
                 key = f"p_T<{thr}"
                 rows.append(
-                    {"Threshold": f"p_T < {thr}", "Probability (%)": ou_probs.get(key, 0.0) * 100}
+                    {
+                        "Threshold": f"p_T < {thr}",
+                        "Probability (%)": ou_probs.get(key, 0.0) * 100,
+                    }
                 )
             st.table(pd.DataFrame(rows).style.format({"Probability (%)": "{:.2f}"}))
 
             st.subheader("Slippage vs Trade Size (AMM)")
             fractions = np.linspace(0.01, max_trade_pct / 100.0, 25)
-            slip_df = slippage_vs_trade_fraction(reserve_stable, reserve_collateral, fractions)
+            slip_df = slippage_vs_trade_fraction(
+                reserve_stable, reserve_collateral, fractions
+            )
             slip_df["trade_pct"] = slip_df["fraction"] * 100
             slip_df["slippage_pct"] = slip_df["slippage"] * 100
 
@@ -769,7 +911,9 @@ with tab1:
             ax3.grid(True)
 
             # highlight chosen trade size
-            highlight = slip_df.iloc[(slip_df["trade_pct"] - highlight_trade_pct).abs().argmin()]
+            highlight = slip_df.iloc[
+                (slip_df["trade_pct"] - highlight_trade_pct).abs().argmin()
+            ]
             ax3.axvline(highlight["trade_pct"], linestyle="--", color="red")
             st.pyplot(fig3)
 
@@ -792,8 +936,12 @@ with tab2:
     peg_target = 1.0
 
     n_sigma = st.slider("Number of σ points", 3, 10, 5, key="curve_n_sigma")
-    sigma_min = st.number_input("Min σ", value=0.01, step=0.005, format="%.3f", key="curve_sigma_min")
-    sigma_max = st.number_input("Max σ", value=0.05, step=0.005, format="%.3f", key="curve_sigma_max")
+    sigma_min = st.number_input(
+        "Min σ", value=0.01, step=0.005, format="%.3f", key="curve_sigma_min"
+    )
+    sigma_max = st.number_input(
+        "Max σ", value=0.05, step=0.005, format="%.3f", key="curve_sigma_max"
+    )
 
     sigma_grid = np.linspace(sigma_min, sigma_max, n_sigma)
     rows = []
@@ -836,14 +984,11 @@ with tab3:
 
     grid_df = load_grid_csv()
     if grid_df is None:
-        
         st.warning(
             f"No precomputed grid found at `{DATA_DIR / 'peg_liquidity_grid.csv'}`.\n\n"
             "Run `python experiments/run_peg_stress_grid.py` from the project root "
             "to generate it, then reload this app."
         )
-
-        
     else:
         kappa_choice = st.selectbox(
             "Select κ",
@@ -856,7 +1001,11 @@ with tab3:
             format_func=lambda x: f"{x*100:.1f}%",
         )
         threshold_cols = [c for c in grid_df.columns if c.startswith("p_T<")]
-        threshold_choice = st.selectbox("Depeg threshold", threshold_cols, index=1 if "p_T<0.95" in threshold_cols else 0)
+        threshold_choice = st.selectbox(
+            "Depeg threshold",
+            threshold_cols,
+            index=1 if "p_T<0.95" in threshold_cols else 0,
+        )
 
         dfh = grid_df[
             (grid_df["kappa"] == kappa_choice)
@@ -869,7 +1018,9 @@ with tab3:
 
         for i, R in enumerate(reserves):
             for j, s in enumerate(sigmas):
-                val = dfh[(dfh["reserves"] == R) & (dfh["sigma"] == s)][threshold_choice].mean()
+                val = dfh[
+                    (dfh["reserves"] == R) & (dfh["sigma"] == s)
+                ][threshold_choice].mean()
                 Z[i, j] = val
 
         fig5, ax5 = plt.subplots(figsize=(7, 5))
