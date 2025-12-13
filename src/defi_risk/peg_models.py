@@ -1,9 +1,20 @@
 # src/defi_risk/peg_models.py
 
-from typing import Optional
-
+from typing import Optional, Literal, Dict
 import numpy as np
 import pandas as pd
+
+PegModelName = Literal["basic_ou", "stress_ou", "ou_jumps"]
+
+PEG_MODEL_LABELS: Dict[PegModelName, str] = {
+    "basic_ou": "Basic OU",
+    "stress_ou": "Stress-aware OU",
+    "ou_jumps": "OU with jumps",
+}
+
+
+def _make_time_grid(n_steps: int, T: float) -> np.ndarray:
+    return np.linspace(0.0, T, n_steps + 1)
 
 
 def simulate_ou_peg_paths(
@@ -17,49 +28,26 @@ def simulate_ou_peg_paths(
     random_seed: Optional[int] = None,
 ) -> pd.DataFrame:
     """
-    Simulate Ornstein–Uhlenbeck (OU) peg dynamics:
+    Basic Ornstein–Uhlenbeck (OU) peg dynamics:
 
         dp_t = kappa * (peg - p_t) dt + sigma dW_t
-
-    Parameters
-    ----------
-    n_paths : int
-        Number of simulated paths.
-    n_steps : int
-        Number of time steps.
-    T : float
-        Time horizon (e.g. in years).
-    kappa : float
-        Mean reversion speed towards `peg`.
-    sigma : float
-        Volatility of the peg process.
-    p0 : float, default 1.0
-        Initial price / peg level.
-    peg : float, default 1.0
-        Long-run mean (peg target).
-    random_seed : Optional[int]
-        Optional RNG seed for reproducibility.
-
-    Returns
-    -------
-    pd.DataFrame
-        DataFrame of shape (n_steps + 1, n_paths)
-        Index is the time grid from 0 to T.
-        Each column is one simulated path.
     """
     if random_seed is not None:
         np.random.seed(random_seed)
 
     dt = T / n_steps
-    times = np.linspace(0.0, T, n_steps + 1)
+    times = _make_time_grid(n_steps, T)
+
     prices = np.zeros((n_steps + 1, n_paths), dtype=float)
     prices[0, :] = p0
 
     for t in range(1, n_steps + 1):
         z = np.random.normal(size=n_paths)
         prev = prices[t - 1, :]
+
         drift = kappa * (peg - prev) * dt
         diffusion = sigma * np.sqrt(dt) * z
+
         prices[t, :] = prev + drift + diffusion
 
     df = pd.DataFrame(prices, index=times)
@@ -67,223 +55,173 @@ def simulate_ou_peg_paths(
     return df
 
 
-# NEW: state-dependent OU peg dynamics -------------------------------------
-
-
-def simulate_state_dependent_ou_peg_paths(
-    n_paths: int,
-    n_steps: int,
-    T: float,
-    kappa_base: float,
-    sigma_base: float,
-    stress_path: np.ndarray,
-    kappa_sensitivity: float = 1.0,
-    sigma_sensitivity: float = 1.0,
-    p0: float = 1.0,
-    peg: float = 1.0,
-    random_seed: Optional[int] = None,
-) -> pd.DataFrame:
-    """
-    Simulate OU peg dynamics where mean reversion (kappa) and volatility (sigma)
-    depend on a stress indicator at each time step.
-
-        dp_t = kappa_t * (peg - p_t) dt + sigma_t dW_t
-
-    A simple specification is:
-
-        kappa_t = kappa_base / (1 + kappa_sensitivity * stress_t)
-        sigma_t = sigma_base * (1 + sigma_sensitivity * stress_t)
-
-    so that higher stress weakens mean reversion and increases volatility.
-
-    Parameters
-    ----------
-    n_paths : int
-        Number of simulated paths.
-    n_steps : int
-        Number of time steps.
-    T : float
-        Time horizon (e.g. in years).
-    kappa_base : float
-        Baseline mean reversion speed.
-    sigma_base : float
-        Baseline volatility of the peg process.
-    stress_path : np.ndarray
-        Array of length n_steps with non-negative stress levels
-        (e.g. in [0, 1] or [0, +inf)).
-    kappa_sensitivity : float
-        How strongly stress weakens mean reversion.
-    sigma_sensitivity : float
-        How strongly stress amplifies volatility.
-    p0 : float, default 1.0
-        Initial price / peg level.
-    peg : float, default 1.0
-        Long-run mean (peg target).
-    random_seed : Optional[int]
-        Optional RNG seed for reproducibility.
-
-    Returns
-    -------
-    pd.DataFrame
-        DataFrame of shape (n_steps + 1, n_paths)
-        Index is the time grid from 0 to T.
-    """
-    if random_seed is not None:
-        np.random.seed(random_seed)
-
-    stress_path = np.asarray(stress_path, dtype=float)
-    if stress_path.shape[0] != n_steps:
-        raise ValueError(
-            f"stress_path must have length n_steps={n_steps}, "
-            f"got {stress_path.shape[0]}"
-        )
-    if np.any(stress_path < 0):
-        raise ValueError("stress_path must be non-negative.")
-
-    dt = T / n_steps
-    times = np.linspace(0.0, T, n_steps + 1)
-    prices = np.zeros((n_steps + 1, n_paths), dtype=float)
-    prices[0, :] = p0
-
-    for t in range(1, n_steps + 1):
-        z = np.random.normal(size=n_paths)
-        prev = prices[t - 1, :]
-
-        stress_t = stress_path[t - 1]
-
-        # State-dependent parameters
-        kappa_t = kappa_base / (1.0 + kappa_sensitivity * stress_t)
-        sigma_t = sigma_base * (1.0 + sigma_sensitivity * stress_t)
-
-        drift = kappa_t * (peg - prev) * dt
-        diffusion = sigma_t * np.sqrt(dt) * z
-        prices[t, :] = prev + drift + diffusion
-
-    df = pd.DataFrame(prices, index=times)
-    df.index.name = "time"
-    return df
-
-
-def make_stress_path_two_regime(
-    n_steps: int,
-    stress_low: float = 0.0,
-    stress_high: float = 1.0,
-    switch_step: Optional[int] = None,
-) -> np.ndarray:
-    """
-    Simple helper to build a stress path representing a calm-to-stressed scenario.
-
-    Parameters
-    ----------
-    n_steps : int
-        Number of time steps.
-    stress_low : float
-        Stress level in the calm regime (e.g. 0.0).
-    stress_high : float
-        Stress level in the stressed regime (e.g. 1.0).
-    switch_step : Optional[int]
-        Time step at which to switch from low to high stress.
-        If None, stress remains at stress_low.
-
-    Returns
-    -------
-    np.ndarray
-        Array of length n_steps with stress levels.
-    """
-    stress = np.full(n_steps, stress_low, dtype=float)
-    if switch_step is not None and 0 <= switch_step < n_steps:
-        stress[switch_step:] = stress_high
-    return stress
-
-
-def simulate_ou_peg_paths_with_jumps(
+def simulate_stress_aware_ou_paths(
     n_paths: int,
     n_steps: int,
     T: float,
     kappa: float,
     sigma: float,
-    lambda_jump: float,
-    jump_mean: float,
-    jump_std: float,
+    alpha_kappa: float = 1.0,
+    beta_sigma: float = 3.0,
     p0: float = 1.0,
     peg: float = 1.0,
     random_seed: Optional[int] = None,
 ) -> pd.DataFrame:
     """
-    Simulate OU peg dynamics with occasional jump shocks:
+    Stress-aware OU:
 
-        dp_t = kappa * (peg - p_t) dt + sigma dW_t + J_t
+    - Mean reversion weakens when the peg drifts far from 1
+    - Volatility increases when the peg drifts
 
-    where J_t is a jump term. We approximate a Poisson jump process by
-    allowing at most one jump per time step:
-
-        with probability lambda_jump * dt, add a jump ~ Normal(jump_mean, jump_std)
-        otherwise, no jump.
-
-    This is useful to model rare but meaningful peg shocks, e.g. news events,
-    bank failures, or protocol exploits.
-
-    Parameters
-    ----------
-    n_paths : int
-        Number of simulated paths.
-    n_steps : int
-        Number of time steps.
-    T : float
-        Time horizon (e.g. in years).
-    kappa : float
-        Mean reversion speed towards `peg`.
-    sigma : float
-        Diffusion volatility of the peg process.
-    lambda_jump : float
-        Expected number of jumps per unit time (e.g. 0.5 for ~1 jump every 2 years).
-    jump_mean : float
-        Mean jump size (in price units). Negative values model downward shocks.
-    jump_std : float
-        Standard deviation of the jump size.
-    p0 : float, default 1.0
-        Initial price / peg level.
-    peg : float, default 1.0
-        Long-run mean (peg target).
-    random_seed : Optional[int]
-        Optional RNG seed for reproducibility.
-
-    Returns
-    -------
-    pd.DataFrame
-        DataFrame of shape (n_steps + 1, n_paths)
-        Index is the time grid from 0 to T.
+        kappa_eff = kappa / (1 + alpha_kappa * |p - peg|)
+        sigma_eff = sigma * (1 + beta_sigma * |p - peg|)
     """
     if random_seed is not None:
         np.random.seed(random_seed)
 
     dt = T / n_steps
-    times = np.linspace(0.0, T, n_steps + 1)
+    times = _make_time_grid(n_steps, T)
+
     prices = np.zeros((n_steps + 1, n_paths), dtype=float)
     prices[0, :] = p0
-
-    # Probability of a jump in each time step
-    p_jump = lambda_jump * dt
-    p_jump = min(max(p_jump, 0.0), 1.0)  # clip for safety
 
     for t in range(1, n_steps + 1):
         z = np.random.normal(size=n_paths)
         prev = prices[t - 1, :]
 
-        # Diffusion part (standard OU)
-        drift = kappa * (peg - prev) * dt
-        diffusion = sigma * np.sqrt(dt) * z
+        dist = np.abs(prev - peg)
 
-        # Jump part: at most one jump per time step per path
-        jump_indicator = np.random.binomial(1, p_jump, size=n_paths)
-        jumps = np.where(
-            jump_indicator == 1,
-            np.random.normal(loc=jump_mean, scale=jump_std, size=n_paths),
-            0.0,
-        )
+        kappa_eff = kappa / (1.0 + alpha_kappa * dist)
+        sigma_eff = sigma * (1.0 + beta_sigma * dist)
 
-        prices[t, :] = prev + drift + diffusion + jumps
+        drift = kappa_eff * (peg - prev) * dt
+        diffusion = sigma_eff * np.sqrt(dt) * z
+
+        prices[t, :] = prev + drift + diffusion
 
     df = pd.DataFrame(prices, index=times)
     df.index.name = "time"
     return df
+
+
+def simulate_ou_with_jumps(
+    n_paths: int,
+    n_steps: int,
+    T: float,
+    kappa: float,
+    sigma: float,
+    jump_intensity: float = 0.2,
+    jump_mean: float = -0.05,
+    jump_std: float = 0.03,
+    p0: float = 1.0,
+    peg: float = 1.0,
+    random_seed: Optional[int] = None,
+) -> pd.DataFrame:
+    """
+    OU with downward jumps (tail events):
+
+        dp_t = kappa(peg - p_t)dt + sigma dW_t + J_t
+
+    - jump_intensity: expected number of jumps per year
+    - jumps are additive, mainly negative (downward depeg shocks)
+    """
+    if random_seed is not None:
+        np.random.seed(random_seed)
+
+    dt = T / n_steps
+    times = _make_time_grid(n_steps, T)
+
+    prices = np.zeros((n_steps + 1, n_paths), dtype=float)
+    prices[0, :] = p0
+
+    for t in range(1, n_steps + 1):
+        z = np.random.normal(size=n_paths)
+        prev = prices[t - 1, :]
+
+        drift = kappa * (peg - prev) * dt
+        diffusion = sigma * np.sqrt(dt) * z
+
+        # Poisson number of jumps within dt
+        n_jumps = np.random.poisson(lam=jump_intensity * dt, size=n_paths)
+
+        # If a jump occurs, draw a (mostly) downward shock
+        # lognormal-ish with negative mean
+        jump_shocks = np.where(
+            n_jumps > 0,
+            np.random.normal(loc=jump_mean, scale=jump_std, size=n_paths),
+            0.0,
+        )
+
+        new_price = prev + drift + diffusion + jump_shocks
+
+        # Avoid negative / zero prices – clip at 0.1 for safety
+        prices[t, :] = np.clip(new_price, 0.1, None)
+
+    df = pd.DataFrame(prices, index=times)
+    df.index.name = "time"
+    return df
+
+
+def simulate_peg_paths(
+    model: PegModelName,
+    n_paths: int,
+    n_steps: int,
+    T: float,
+    kappa: float,
+    sigma: float,
+    p0: float = 1.0,
+    peg: float = 1.0,
+    random_seed: Optional[int] = None,
+    # optional extra kwargs for stress / jumps
+    alpha_kappa: float = 1.0,
+    beta_sigma: float = 3.0,
+    jump_intensity: float = 0.2,
+    jump_mean: float = -0.05,
+    jump_std: float = 0.03,
+) -> pd.DataFrame:
+    """
+    Unified entry point for all peg models.
+
+    The Streamlit app should call *this* function, so adding a new
+    peg model only requires editing this file, not the UI.
+    """
+    if model == "basic_ou":
+        return simulate_ou_peg_paths(
+            n_paths=n_paths,
+            n_steps=n_steps,
+            T=T,
+            kappa=kappa,
+            sigma=sigma,
+            p0=p0,
+            peg=peg,
+            random_seed=random_seed,
+        )
+    elif model == "stress_ou":
+        return simulate_stress_aware_ou_paths(
+            n_paths=n_paths,
+            n_steps=n_steps,
+            T=T,
+            kappa=kappa,
+            sigma=sigma,
+            alpha_kappa=alpha_kappa,
+            beta_sigma=beta_sigma,
+            p0=p0,
+            peg=peg,
+            random_seed=random_seed,
+        )
+    elif model == "ou_jumps":
+        return simulate_ou_with_jumps(
+            n_paths=n_paths,
+            n_steps=n_steps,
+            T=T,
+            kappa=kappa,
+            sigma=sigma,
+            jump_intensity=jump_intensity,
+            jump_mean=jump_mean,
+            jump_std=jump_std,
+            p0=p0,
+            peg=peg,
+            random_seed=random_seed,
+        )
+    else:
+        raise ValueError(f"Unknown peg model: {model}")

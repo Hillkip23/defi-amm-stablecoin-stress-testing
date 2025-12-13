@@ -20,7 +20,7 @@ DATA_DIR = ROOT / "data"
 
 from defi_risk.simulation import simulate_gbm_price_paths, compute_lp_vs_hodl
 from defi_risk.amm_pricing import impermanent_loss, lp_over_hodl_univ3, slippage_vs_trade_fraction
-from defi_risk.peg_models import simulate_ou_peg_paths
+from defi_risk.peg_models import simulate_peg_paths, PEG_MODEL_LABELS, PegModelName
 from defi_risk.peg_stress import depeg_probabilities
 
 
@@ -622,6 +622,11 @@ from defi_risk.stablecoin import ( simulate_mean_reverting_peg, slippage_curve, 
 # 🪙 Stablecoin Peg & Liquidity Stress Lab (OU + AMM)
 # =====================================================
 
+
+# =====================================================
+# 🪙 Stablecoin Peg & Liquidity Stress Lab (OU + AMM)
+# =====================================================
+
 st.header("🪙 Stablecoin Peg & Liquidity Stress Lab")
 
 st.markdown(
@@ -636,119 +641,6 @@ Use the tabs below to explore:
 3. **Heatmap** – depeg probability across σ × reserves (from precomputed grid)
 """
 )
-
-
-# Small helpers specific to this section
-def simulate_ou_cached(n_paths, n_steps, T, kappa, sigma, p0, peg, seed):
-    return simulate_ou_peg_paths(
-        n_paths=n_paths,
-        n_steps=n_steps,
-        T=T,
-        kappa=kappa,
-        sigma=sigma,
-        p0=p0,
-        peg=peg,
-        random_seed=seed,
-    )
-
-
-def simulate_ou_stress_aware(
-    n_paths: int,
-    n_steps: int,
-    T: float,
-    kappa: float,
-    sigma: float,
-    p0: float,
-    peg: float,
-    seed: int,
-    stress_mult: float = 3.0,
-    stress_band: float = 0.01,
-) -> pd.DataFrame:
-    """
-    OU with volatility that increases when the peg is stressed.
-
-    - Near the peg (|p - peg| small) → volatility ~ sigma
-    - As deviation approaches `stress_band` (e.g. 1%) → volatility ramps up
-      towards `stress_mult * sigma`.
-    """
-    if seed is not None:
-        np.random.seed(seed)
-
-    dt = T / n_steps
-    times = np.linspace(0.0, T, n_steps + 1)
-    prices = np.zeros((n_steps + 1, n_paths), dtype=float)
-    prices[0, :] = p0
-
-    for t in range(1, n_steps + 1):
-        z = np.random.normal(size=n_paths)
-        prev = prices[t - 1, :]
-
-        deviation = np.abs(prev - peg)
-        # 0 → 1 as deviation goes from 0 to stress_band
-        stress_level = np.clip(deviation / stress_band, 0.0, 1.0)
-        sigma_t = sigma * (1.0 + (stress_mult - 1.0) * stress_level)
-
-        drift = kappa * (peg - prev) * dt
-        diffusion = sigma_t * np.sqrt(dt) * z
-        prices[t, :] = prev + drift + diffusion
-
-    df = pd.DataFrame(prices, index=times)
-    df.index.name = "time"
-    return df
-
-
-def simulate_ou_with_jumps(
-    n_paths: int,
-    n_steps: int,
-    T: float,
-    kappa: float,
-    sigma: float,
-    p0: float,
-    peg: float,
-    seed: int,
-    jump_intensity: float = 1.0,   # ~1 jump per year
-    jump_mean: float = -0.02,      # average 2% downward jump
-    jump_std: float = 0.01,        # jump size variability
-) -> pd.DataFrame:
-    """
-    OU with occasional jump shocks:
-
-        dp_t = kappa(peg - p_t) dt + sigma dW_t + J_t
-
-    where J_t is a jump term occurring with Poisson intensity `jump_intensity`
-    and normally-distributed jump size.
-    """
-    if seed is not None:
-        np.random.seed(seed)
-
-    dt = T / n_steps
-    times = np.linspace(0.0, T, n_steps + 1)
-    prices = np.zeros((n_steps + 1, n_paths), dtype=float)
-    prices[0, :] = p0
-
-    for t in range(1, n_steps + 1):
-        z = np.random.normal(size=n_paths)
-        prev = prices[t - 1, :]
-
-        drift = kappa * (peg - prev) * dt
-        diffusion = sigma * np.sqrt(dt) * z
-
-        # Bernoulli approximation to Poisson(λ dt)
-        jump_prob = jump_intensity * dt
-        jump_mask = np.random.rand(n_paths) < jump_prob
-        jump_sizes = np.zeros(n_paths)
-        if jump_mask.any():
-            jump_sizes[jump_mask] = np.random.normal(
-                loc=jump_mean,
-                scale=jump_std,
-                size=jump_mask.sum(),
-            )
-
-        prices[t, :] = prev + drift + diffusion + jump_sizes
-
-    df = pd.DataFrame(prices, index=times)
-    df.index.name = "time"
-    return df
 
 
 def load_grid_csv():
@@ -771,23 +663,32 @@ tab1, tab2, tab3 = st.tabs(
 # TAB 1 – Scenario explorer (OU + slippage)
 # ---------------------------------------------
 with tab1:
+    # Peg model choice (drives which SDE we simulate)
+    peg_model_key: PegModelName = st.selectbox(
+        "Peg model",
+        options=list(PEG_MODEL_LABELS.keys()),
+        format_func=lambda k: PEG_MODEL_LABELS[k],
+        key="peg_model_choice",
+    )
+
     col_left, col_right = st.columns(2)
 
     with col_left:
         st.subheader("Peg Dynamics Parameters")
 
-        peg_model = st.selectbox(
-            "Peg model",
-            ["Basic OU", "Stress-aware OU", "OU with jumps"],
-            index=0,
-            key="peg_model",
+        n_paths_peg = st.slider(
+            "Number of OU paths", 200, 5000, 1000, key="peg_n_paths"
         )
-
-        n_paths_peg = st.slider("Number of OU paths", 200, 5000, 1000, key="peg_n_paths")
-        n_steps_peg = st.slider("Steps per path (peg)", 50, 365, 252, key="peg_n_steps")
+        n_steps_peg = st.slider(
+            "Steps per path (peg)", 50, 365, 252, key="peg_n_steps"
+        )
         T_peg = st.slider("Horizon (years)", 0.1, 2.0, 1.0, key="peg_T")
-        kappa_peg = st.slider("Mean reversion speed (κ)", 0.1, 10.0, 5.0, key="peg_kappa")
-        sigma_peg = st.slider("Peg volatility (σ)", 0.001, 0.1, 0.02, key="peg_sigma")
+        kappa_peg = st.slider(
+            "Mean reversion speed (κ)", 0.1, 10.0, 5.0, key="peg_kappa"
+        )
+        sigma_peg = st.slider(
+            "Peg volatility (σ)", 0.001, 0.1, 0.02, key="peg_sigma"
+        )
         p0_peg = st.slider("Initial price p₀", 0.90, 1.10, 1.00, key="peg_p0")
         peg_target = 1.0
         seed_peg = 42
@@ -809,62 +710,45 @@ with tab1:
             step=100_000.0,
         )
         max_trade_pct = st.slider(
-            "Max trade size as % of reserves", 1.0, 50.0, 20.0, key="peg_max_trade"
+            "Max trade size as % of reserves",
+            1.0,
+            50.0,
+            20.0,
+            key="peg_max_trade",
         )
         highlight_trade_pct = st.slider(
-            "Highlighted trade size (%)", 1.0, max_trade_pct, 10.0, key="peg_highlight_trade"
+            "Highlighted trade size (%)",
+            1.0,
+            max_trade_pct,
+            10.0,
+            key="peg_highlight_trade",
         )
 
     run_peg = st.button("Run stablecoin scenario")
 
     if run_peg:
-        if peg_model == "Basic OU":
-            prices_peg = simulate_ou_cached(
-                n_paths=n_paths_peg,
-                n_steps=n_steps_peg,
-                T=T_peg,
-                kappa=kappa_peg,
-                sigma=sigma_peg,
-                p0=p0_peg,
-                peg=peg_target,
-                seed=seed_peg,
-            )
-        elif peg_model == "Stress-aware OU":
-            prices_peg = simulate_ou_stress_aware(
-                n_paths=n_paths_peg,
-                n_steps=n_steps_peg,
-                T=T_peg,
-                kappa=kappa_peg,
-                sigma=sigma_peg,
-                p0=p0_peg,
-                peg=peg_target,
-                seed=seed_peg,
-            )
-        elif peg_model == "OU with jumps":
-            prices_peg = simulate_ou_with_jumps(
-                n_paths=n_paths_peg,
-                n_steps=n_steps_peg,
-                T=T_peg,
-                kappa=kappa_peg,
-                sigma=sigma_peg,
-                p0=p0_peg,
-                peg=peg_target,
-                seed=seed_peg,
-            )
-        else:
-            # Fallback (shouldn't happen)
-            prices_peg = simulate_ou_cached(
-                n_paths=n_paths_peg,
-                n_steps=n_steps_peg,
-                T=T_peg,
-                kappa=kappa_peg,
-                sigma=sigma_peg,
-                p0=p0_peg,
-                peg=peg_target,
-                seed=seed_peg,
-            )
+        # All peg models go through the same unified interface
+        prices_peg = simulate_peg_paths(
+            model=peg_model_key,
+            n_paths=n_paths_peg,
+            n_steps=n_steps_peg,
+            T=T_peg,
+            kappa=kappa_peg,
+            sigma=sigma_peg,
+            p0=p0_peg,
+            peg=peg_target,
+            random_seed=seed_peg,
+            # default stress / jump params; can expose via UI later if desired
+            alpha_kappa=1.0,
+            beta_sigma=3.0,
+            jump_intensity=0.2,
+            jump_mean=-0.05,
+            jump_std=0.03,
+        )
 
-        ou_probs = depeg_probabilities(prices_peg, thresholds=(0.99, 0.95, 0.90))
+        ou_probs = depeg_probabilities(
+            prices_peg, thresholds=(0.99, 0.95, 0.90)
+        )
 
         c1, c2 = st.columns(2)
 
@@ -935,11 +819,15 @@ with tab2:
     n_paths_peg = 2000
     n_steps_peg = 252
     T_peg = 1.0
-    kappa_fixed = st.slider("κ for this curve", 0.1, 10.0, 5.0, key="curve_kappa")
+    kappa_fixed = st.slider(
+        "κ for this curve", 0.1, 10.0, 5.0, key="curve_kappa"
+    )
     p0_fixed = 1.0
     peg_target = 1.0
 
-    n_sigma = st.slider("Number of σ points", 3, 10, 5, key="curve_n_sigma")
+    n_sigma = st.slider(
+        "Number of σ points", 3, 10, 5, key="curve_n_sigma"
+    )
     sigma_min = st.number_input(
         "Min σ", value=0.01, step=0.005, format="%.3f", key="curve_sigma_min"
     )
@@ -950,7 +838,8 @@ with tab2:
     sigma_grid = np.linspace(sigma_min, sigma_max, n_sigma)
     rows = []
     for s in sigma_grid:
-        prices_s = simulate_ou_cached(
+        prices_s = simulate_peg_paths(
+            model="basic_ou",  # use baseline OU for this curve
             n_paths=n_paths_peg,
             n_steps=n_steps_peg,
             T=T_peg,
@@ -958,9 +847,11 @@ with tab2:
             sigma=float(s),
             p0=p0_fixed,
             peg=peg_target,
-            seed=123,
+            random_seed=123,
         )
-        probs_s = depeg_probabilities(prices_s, thresholds=(0.99, 0.95, 0.90))
+        probs_s = depeg_probabilities(
+            prices_s, thresholds=(0.99, 0.95, 0.90)
+        )
         row = {"sigma": float(s)}
         row.update(probs_s)
         rows.append(row)
@@ -1004,7 +895,9 @@ with tab3:
             sorted(grid_df["trade_fraction"].unique()),
             format_func=lambda x: f"{x*100:.1f}%",
         )
-        threshold_cols = [c for c in grid_df.columns if c.startswith("p_T<")]
+        threshold_cols = [
+            c for c in grid_df.columns if c.startswith("p_T<")
+        ]
         threshold_choice = st.selectbox(
             "Depeg threshold",
             threshold_cols,
@@ -1046,3 +939,11 @@ with tab3:
 
         st.markdown("Underlying grid data:")
         st.dataframe(dfh.reset_index(drop=True))
+
+
+
+
+
+
+
+

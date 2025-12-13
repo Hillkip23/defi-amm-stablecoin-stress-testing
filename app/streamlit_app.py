@@ -1,3 +1,4 @@
+from typing import Optional
 import os
 import streamlit as st
 import matplotlib.pyplot as plt
@@ -12,17 +13,16 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(ROOT / "src"))
 
 from defi_risk.simulation import simulate_gbm_price_paths, compute_lp_vs_hodl
-from defi_risk.amm_pricing import impermanent_loss, lp_over_hodl_univ3
-from defi_risk.peg_models import (
-    simulate_ou_peg_paths,
-    simulate_state_dependent_ou_peg_paths,
-    simulate_ou_peg_paths_with_jumps,
-    make_stress_path_two_regime,
+from defi_risk.amm_pricing import (
+    impermanent_loss,
+    lp_over_hodl_univ3,
+    slippage_vs_trade_fraction,
 )
 from defi_risk.stablecoin import (
     slippage_curve,
     constant_product_slippage,
 )
+from defi_risk.peg_models import simulate_ou_peg_paths  # ✅ basic OU peg
 
 
 # =====================================================
@@ -532,7 +532,7 @@ if prices_series is not None and not prices_series.empty:
     st.pyplot(fig_ret)
     
     
-        # -------------------------------------------
+    # -------------------------------------------
     # Autocorrelation & volatility clustering
     # -------------------------------------------
     st.subheader("Autocorrelation Diagnostics")
@@ -613,6 +613,136 @@ else:
 
 
 
+# =====================================================
+# Peg-model helpers (defined locally so we don't need
+# to import them from defi_risk.peg_models)
+# =====================================================
+
+def make_stress_path_two_regime(
+    n_steps: int,
+    stress_low: float,
+    stress_high: float,
+    switch_step: int,
+) -> np.ndarray:
+    """
+    Simple two-regime stress path:
+
+    - For steps < switch_step: stress = stress_low
+    - For steps >= switch_step: stress = stress_high
+
+    Returns an array of length n_steps+1 so it lines up with the OU time grid.
+    """
+    stress = np.full(n_steps + 1, stress_low, dtype=float)
+    switch_step = int(np.clip(switch_step, 0, n_steps))
+    stress[switch_step:] = stress_high
+    return stress
+
+
+def simulate_state_dependent_ou_peg_paths(
+    n_paths: int,
+    n_steps: int,
+    T: float,
+    kappa_base: float,
+    sigma_base: float,
+    stress_path: np.ndarray,
+    kappa_sensitivity: float,
+    sigma_sensitivity: float,
+    p0: float,
+    peg: float,
+    random_seed: Optional[int] = None,
+) -> pd.DataFrame:
+    """
+    Ornstein–Uhlenbeck peg with state-dependent parameters.
+
+    At each step t we use:
+      kappa_t = kappa_base * (1 + kappa_sensitivity * stress_t)
+      sigma_t = sigma_base * (1 + sigma_sensitivity * stress_t)
+
+    where stress_t comes from `stress_path[t]`.
+    """
+    if random_seed is not None:
+        np.random.seed(random_seed)
+
+    dt = T / n_steps
+    times = np.linspace(0.0, T, n_steps + 1)
+    prices = np.zeros((n_steps + 1, n_paths), dtype=float)
+    prices[0, :] = p0
+
+    # Ensure stress_path has length n_steps+1
+    if len(stress_path) != n_steps + 1:
+        raise ValueError(
+            f"stress_path must have length {n_steps+1}, got {len(stress_path)}"
+        )
+
+    for t in range(1, n_steps + 1):
+        z = np.random.normal(size=n_paths)
+        prev = prices[t - 1, :]
+
+        s_t = stress_path[t]
+        kappa_t = kappa_base * (1.0 + kappa_sensitivity * s_t)
+        sigma_t = sigma_base * (1.0 + sigma_sensitivity * s_t)
+
+        drift = kappa_t * (peg - prev) * dt
+        diffusion = sigma_t * np.sqrt(dt) * z
+        prices[t, :] = prev + drift + diffusion
+
+    df = pd.DataFrame(prices, index=times)
+    df.index.name = "time"
+    return df
+
+
+def simulate_ou_peg_paths_with_jumps(
+    n_paths: int,
+    n_steps: int,
+    T: float,
+    kappa: float,
+    sigma: float,
+    lambda_jump: float,
+    jump_mean: float,
+    jump_std: float,
+    p0: float,
+    peg: float,
+    random_seed: Optional[int] = None,
+) -> pd.DataFrame:
+    """
+    OU peg with occasional jump shocks:
+
+        dp_t = kappa(peg - p_t) dt + sigma dW_t + J_t
+
+    where J_t occurs with Poisson intensity `lambda_jump` and normally-
+    distributed jump size N(jump_mean, jump_std^2).
+    """
+    if random_seed is not None:
+        np.random.seed(random_seed)
+
+    dt = T / n_steps
+    times = np.linspace(0.0, T, n_steps + 1)
+    prices = np.zeros((n_steps + 1, n_paths), dtype=float)
+    prices[0, :] = p0
+
+    for t in range(1, n_steps + 1):
+        z = np.random.normal(size=n_paths)
+        prev = prices[t - 1, :]
+
+        drift = kappa * (peg - prev) * dt
+        diffusion = sigma * np.sqrt(dt) * z
+
+        # Bernoulli approximation to Poisson(λ dt)
+        jump_prob = max(lambda_jump * dt, 0.0)
+        jump_mask = np.random.rand(n_paths) < jump_prob
+        jump_sizes = np.zeros(n_paths)
+        if jump_mask.any():
+            jump_sizes[jump_mask] = np.random.normal(
+                loc=jump_mean,
+                scale=jump_std,
+                size=jump_mask.sum(),
+            )
+
+        prices[t, :] = prev + drift + diffusion + jump_sizes
+
+    df = pd.DataFrame(prices, index=times)
+    df.index.name = "time"
+    return df
 
 
 st.header("🪙 Stablecoin Peg & Liquidity Stress Lab")
