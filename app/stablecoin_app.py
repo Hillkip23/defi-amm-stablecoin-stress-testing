@@ -15,11 +15,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(ROOT / "src"))
 
+DATA_DIR = ROOT / "data"
 
-
-# Ensure src/ is on the Python path (works locally and on Streamlit Cloud)
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.append(str(ROOT / "src"))
 
 from defi_risk.simulation import simulate_gbm_price_paths, compute_lp_vs_hodl
 from defi_risk.amm_pricing import impermanent_loss, lp_over_hodl_univ3, slippage_vs_trade_fraction
@@ -663,8 +660,14 @@ def simulate_ou_cached(n_paths, n_steps, T, kappa, sigma, p0, peg, seed):
     )
 
 
+
 def load_grid_csv():
-    csv_path = Path(__file__).parent / "data" / "peg_liquidity_grid.csv"
+    """
+    Load the precomputed σ × reserves depeg grid.
+
+    Uses DATA_DIR so it works both locally and on Streamlit Cloud.
+    """
+    csv_path = DATA_DIR / "peg_liquidity_grid.csv"
     if not csv_path.exists():
         return None
     return pd.read_csv(csv_path)
@@ -833,11 +836,14 @@ with tab3:
 
     grid_df = load_grid_csv()
     if grid_df is None:
+        
         st.warning(
-            "No precomputed grid found at `data/peg_liquidity_grid.csv`.\n\n"
-            "Run `python -m scripts.run_peg_stress_grid` from the project root "
+            f"No precomputed grid found at `{DATA_DIR / 'peg_liquidity_grid.csv'}`.\n\n"
+            "Run `python experiments/run_peg_stress_grid.py` from the project root "
             "to generate it, then reload this app."
         )
+
+        
     else:
         kappa_choice = st.selectbox(
             "Select κ",
