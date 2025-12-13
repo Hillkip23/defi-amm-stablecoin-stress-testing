@@ -1,0 +1,7 @@
+# Python bytecode / cache
+__pycache__/
+*.pyc
+
+# Local experiment scripts (keep them out of the repo)
+experiments/test_*.py
+
