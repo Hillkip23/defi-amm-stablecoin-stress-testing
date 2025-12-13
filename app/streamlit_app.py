@@ -128,8 +128,8 @@ st.title("AMM LP Simulation Dashboard")
 st.sidebar.header("Simulation Parameters")
 
 # Defaults (can be overwritten by calibration)
-default_mu = float(st.session_state.get("mu_slider", 0.0))
-default_sigma = float(st.session_state.get("sigma_slider", 0.8))
+default_mu = float(st.session_state.get("mu_default", 0.0))
+default_sigma = float(st.session_state.get("sigma_default", 0.8))
 
 n_paths = st.sidebar.slider("Number of Paths", 1, 5000, 1000)
 n_steps = st.sidebar.slider("Steps per Path", 50, 500, 365)
@@ -587,6 +587,7 @@ if prices_series is not None and not prices_series.empty:
     # -------------------------------------------
     # Rolling volatility (visual volatility clustering)
     # -------------------------------------------
+    # -------------------------------------------
     st.subheader("Rolling Volatility (annualized)")
 
     roll_window = st.selectbox(
@@ -601,22 +602,41 @@ if prices_series is not None and not prices_series.empty:
 
     st.line_chart(rolling_vol.rename("Rolling σ (annualized)"))
 
+    # Use last rolling σ as "current regime" volatility.
+    if not rolling_vol.empty:
+        latest_rolling_sigma = float(rolling_vol.iloc[-1])
+        st.metric(
+            "σ (current rolling window)",
+            f"{latest_rolling_sigma:.2%}",
+            help="Last value of rolling annualized volatility over the selected window.",
+        )
+    else:
+        # Fallback to full-sample σ if rolling window is too short
+        latest_rolling_sigma = float(sigma_hat)
 
     if st.button("Use these parameters for simulation"):
-        st.session_state["mu_slider"] = float(mu_hat)
-        st.session_state["sigma_slider"] = float(sigma_hat)
-        st.success("Updated Drift μ and Volatility σ sliders from calibration.")
-        st.experimental_rerun()
+        # Update *default* values used when creating the sliders
+        st.session_state["mu_default"] = float(mu_hat)
+        st.session_state["sigma_default"] = latest_rolling_sigma
+        st.success(
+            "Updated Drift μ and Volatility σ defaults from calibration. "
+            "Adjust sliders or run a simulation above."
+        )
+
+
+
 else:
     st.info("Select an asset and/or upload a CSV to run calibration.")
 
 
 
-
+# Stablecoin Peg & Liquidity Stree Lab
 # =====================================================
 # Peg-model helpers (defined locally so we don't need
 # to import them from defi_risk.peg_models)
 # =====================================================
+
+
 
 def make_stress_path_two_regime(
     n_steps: int,
@@ -955,11 +975,62 @@ if run_peg:
     ax_hist_peg.grid(True)
     st.pyplot(fig_hist_peg)
 
+    
     peg_stats = pd.Series(final_prices).describe(
         percentiles=[0.01, 0.05, 0.5, 0.95, 0.99]
     )
     st.write("Peg stats at horizon:")
     st.write(peg_stats)
+
+    # --- Depeg severity metrics ---
+    st.subheader("Depeg Severity Metrics")
+
+    # Shortfall at horizon
+    shortfall = np.maximum(1.0 - final_prices, 0.0)
+    prob_below_1 = (final_prices < 1.0).mean()
+    prob_below_099 = (final_prices < 0.99).mean()
+    expected_shortfall = shortfall.mean()  # E[(1 - p_T)+]
+
+    if prob_below_1 > 0:
+        conditional_shortfall = shortfall[final_prices < 1.0].mean()
+    else:
+        conditional_shortfall = 0.0
+
+    # Time spent below peg during the whole path
+    below_1_mask = peg_df < 1.0
+    frac_time_below_1_per_path = below_1_mask.mean(axis=0)  # fraction of time for each path
+    avg_frac_time_below_1 = float(frac_time_below_1_per_path.mean())
+    avg_time_below_1 = avg_frac_time_below_1 * T_peg  # in "years"
+
+    below_099_mask = peg_df < 0.99
+    frac_time_below_099_per_path = below_099_mask.mean(axis=0)
+    avg_frac_time_below_099 = float(frac_time_below_099_per_path.mean())
+    avg_time_below_099 = avg_frac_time_below_099 * T_peg
+
+    severity_df = pd.DataFrame(
+        {
+            "prob(p_T < 1.00)": [prob_below_1],
+            "prob(p_T < 0.99)": [prob_below_099],
+            "E[(1 - p_T)+]": [expected_shortfall],
+            "E[1 - p_T | p_T < 1]": [conditional_shortfall],
+            "avg time < 1.00 (years)": [avg_time_below_1],
+            "avg time < 0.99 (years)": [avg_time_below_099],
+        }
+    )
+
+    st.write(
+        severity_df.style.format(
+            {
+                "prob(p_T < 1.00)": "{:.1%}",
+                "prob(p_T < 0.99)": "{:.1%}",
+                "E[(1 - p_T)+]": "{:.4f}",
+                "E[1 - p_T | p_T < 1]": "{:.4f}",
+                "avg time < 1.00 (years)": "{:.3f}",
+                "avg time < 0.99 (years)": "{:.3f}",
+            }
+        )
+    )
+
 
     # --- Slippage curve ---
     st.subheader("Slippage vs Trade Size (AMM Pool)")
