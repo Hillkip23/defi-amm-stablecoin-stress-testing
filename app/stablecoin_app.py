@@ -609,7 +609,11 @@ if prices_series is not None and not prices_series.empty:
 else:
     st.info("Select an asset and/or upload a CSV to run calibration.")
 
-
+import matplotlib.pyplot as plt 
+import numpy as np 
+import pandas as pd 
+import streamlit as st 
+from defi_risk.stablecoin import ( simulate_mean_reverting_peg, slippage_curve, constant_product_slippage, )
 
 
 
