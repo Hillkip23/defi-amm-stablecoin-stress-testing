@@ -11,10 +11,18 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(ROOT / "src"))
 
-
-
 from defi_risk.simulation import simulate_gbm_price_paths, compute_lp_vs_hodl
 from defi_risk.amm_pricing import impermanent_loss, lp_over_hodl_univ3
+from defi_risk.peg_models import (
+    simulate_ou_peg_paths,
+    simulate_state_dependent_ou_peg_paths,
+    simulate_ou_peg_paths_with_jumps,
+    make_stress_path_two_regime,
+)
+from defi_risk.stablecoin import (
+    slippage_curve,
+    constant_product_slippage,
+)
 
 
 # =====================================================
@@ -603,18 +611,8 @@ else:
     st.info("Select an asset and/or upload a CSV to run calibration.")
 
 
-import matplotlib.pyplot as plt
-import numpy as np
-import pandas as pd
-import streamlit as st
 
-from defi_risk.stablecoin import (
-    simulate_mean_reverting_peg,
-    slippage_curve,
-    constant_product_slippage,
-)
 
-# ... your existing code above ...
 
 
 st.header("🪙 Stablecoin Peg & Liquidity Stress Lab")
@@ -636,6 +634,12 @@ col_left, col_right = st.columns(2)
 
 with col_left:
     st.subheader("Peg Dynamics Parameters")
+
+    peg_model = st.selectbox(
+        "Peg model",
+        ["Basic OU", "Stress-aware OU", "OU with jumps"],
+    )
+
     n_paths_peg = st.slider("Number of paths", 50, 2000, 500)
     n_steps_peg = st.slider("Steps per path (peg)", 50, 365, 252)
     T_peg = st.slider("Horizon (years)", 0.1, 2.0, 1.0)
@@ -643,21 +647,95 @@ with col_left:
     sigma_peg = st.slider("Peg volatility (σ)", 0.001, 0.1, 0.02)
     p0_peg = st.slider("Initial price", 0.90, 1.10, 1.00)
 
+    if peg_model == "Stress-aware OU":
+        st.markdown("**Stress-aware settings**")
+        stress_high = st.slider(
+            "Stress level in stressed regime",
+            0.0,
+            5.0,
+            1.0,
+            0.1,
+        )
+        stress_switch_frac = st.slider(
+            "Time of stress onset (fraction of horizon)",
+            0.0,
+            1.0,
+            0.5,
+            0.05,
+        )
+        kappa_sens = st.slider(
+            "Mean reversion sensitivity to stress",
+            0.0,
+            5.0,
+            1.0,
+            0.1,
+        )
+        sigma_sens = st.slider(
+            "Volatility sensitivity to stress",
+            0.0,
+            5.0,
+            2.0,
+            0.1,
+        )
+
+    elif peg_model == "OU with jumps":
+        st.markdown("**Jump shock settings**")
+        lambda_jump = st.slider(
+            "Expected jumps per year (λ)",
+            0.0,
+            5.0,
+            1.0,
+            0.1,
+        )
+        jump_mean = st.slider(
+            "Average jump size (negative = downward, e.g. -0.05 = -5%)",
+            -0.50,
+            0.0,
+            -0.05,
+            0.01,
+        )
+        jump_std = st.slider(
+            "Jump size volatility",
+            0.0,
+            0.5,
+            0.02,
+            0.01,
+        )
+
 with col_right:
     st.subheader("Pool & Stress Parameters")
-    reserve_stable = st.number_input("Stablecoin reserve in pool", 100_000.0, 100_000_000.0, 1_000_000.0, step=50_000.0)
-    reserve_collateral = st.number_input("Collateral reserve in pool", 100_000.0, 100_000_000.0, 1_000_000.0, step=50_000.0)
+    reserve_stable = st.number_input(
+        "Stablecoin reserve in pool",
+        100_000.0,
+        100_000_000.0,
+        1_000_000.0,
+        step=50_000.0,
+    )
+    reserve_collateral = st.number_input(
+        "Collateral reserve in pool",
+        100_000.0,
+        100_000_000.0,
+        1_000_000.0,
+        step=50_000.0,
+    )
     fee_bps = st.slider("AMM fee (bps)", 0, 100, 4)
-    max_trade_pct = st.slider("Max trade size as % of stable reserve", 0.05, 1.0, 0.5)
+    max_trade_pct = st.slider(
+        "Max trade size as % of stable reserve", 0.05, 1.0, 0.5
+    )
     stress_scenario = st.selectbox(
         "Stress scenario",
-        ["Normal", "Volatility shock (σ × 3)", "Liquidity shock (-50% depth)", "Vol + Liquidity shock"],
+        [
+            "Normal",
+            "Volatility shock (σ × 3)",
+            "Liquidity shock (-50% depth)",
+            "Vol + Liquidity shock",
+        ],
     )
 
 run_peg = st.button("Run Stablecoin Peg Simulation")
 
 if run_peg:
-    # Apply stress
+    # Apply stress to volatility and liquidity
     sigma_eff = sigma_peg
     reserve_stable_eff = reserve_stable
     reserve_collateral_eff = reserve_collateral
@@ -673,21 +751,60 @@ if run_peg:
         reserve_collateral_eff = reserve_collateral * 0.5
 
     st.write("Simulating peg paths...")
-    peg_df = simulate_mean_reverting_peg(
-        n_paths=n_paths_peg,
-        n_steps=n_steps_peg,
-        T=T_peg,
-        kappa=kappa,
-        sigma=sigma_eff,
-        p0=p0_peg,
-        mu_level=1.0,
-        random_seed=42,
-    )
+
+    # Choose peg model
+    if peg_model == "Basic OU":
+        peg_df = simulate_ou_peg_paths(
+            n_paths=n_paths_peg,
+            n_steps=n_steps_peg,
+            T=T_peg,
+            kappa=kappa,
+            sigma=sigma_eff,
+            p0=p0_peg,
+            peg=1.0,
+            random_seed=42,
+        )
+
+    elif peg_model == "Stress-aware OU":
+        stress_path = make_stress_path_two_regime(
+            n_steps=n_steps_peg,
+            stress_low=0.0,
+            stress_high=stress_high,
+            switch_step=int(stress_switch_frac * n_steps_peg),
+        )
+
+        peg_df = simulate_state_dependent_ou_peg_paths(
+            n_paths=n_paths_peg,
+            n_steps=n_steps_peg,
+            T=T_peg,
+            kappa_base=kappa,
+            sigma_base=sigma_eff,
+            stress_path=stress_path,
+            kappa_sensitivity=kappa_sens,
+            sigma_sensitivity=sigma_sens,
+            p0=p0_peg,
+            peg=1.0,
+            random_seed=42,
+        )
+
+    else:  # "OU with jumps"
+        peg_df = simulate_ou_peg_paths_with_jumps(
+            n_paths=n_paths_peg,
+            n_steps=n_steps_peg,
+            T=T_peg,
+            kappa=kappa,
+            sigma=sigma_eff,
+            lambda_jump=lambda_jump,
+            jump_mean=jump_mean,
+            jump_std=jump_std,
+            p0=p0_peg,
+            peg=1.0,
+            random_seed=42,
+        )
 
     # --- Plot some sample paths ---
     st.subheader("Simulated Peg Paths")
     fig_peg, ax_peg = plt.subplots()
-    # show only a subset of paths for clarity
     sample_cols = peg_df.columns[: min(30, peg_df.shape[1])]
     ax_peg.plot(peg_df.index, peg_df[sample_cols])
     ax_peg.axhline(1.0, color="black", linestyle="--", label="Target peg = 1.0")
@@ -708,8 +825,9 @@ if run_peg:
     ax_hist_peg.grid(True)
     st.pyplot(fig_hist_peg)
 
-    # basic stats
-    peg_stats = pd.Series(final_prices).describe(percentiles=[0.01, 0.05, 0.5, 0.95, 0.99])
+    peg_stats = pd.Series(final_prices).describe(
+        percentiles=[0.01, 0.05, 0.5, 0.95, 0.99]
+    )
     st.write("Peg stats at horizon:")
     st.write(peg_stats)
 
@@ -732,7 +850,6 @@ if run_peg:
     st.pyplot(fig_slip)
 
     # --- Simple "peg resiliency" metrics ---
-    # find trade size where impact exceeds 1% and 3%
     def find_threshold(target_impact):
         mask = slip_df["price_impact_pct"].abs() >= target_impact
         if not mask.any():
