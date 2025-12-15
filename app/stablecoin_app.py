@@ -22,12 +22,8 @@ from defi_risk.amm_pricing import (
     lp_over_hodl_univ3,
     slippage_vs_trade_fraction,
 )
-from defi_risk.peg_models import (
-    PEG_MODEL_LABELS,
-    simulate_ou_peg_paths,
-    simulate_stress_aware_ou_paths,
-    simulate_ou_with_jumps,
-)
+import defi_risk.peg_models as peg_models
+
 from defi_risk.peg_stress import depeg_probabilities
 from defi_risk.stablecoin import (
     simulate_mean_reverting_peg,
@@ -37,8 +33,8 @@ from defi_risk.stablecoin import (
 
 
 # ---------------------------------------------------------------------
-# Local dispatcher: simulate_peg_paths
-# ---------------------------------------------------------------------
+from typing import Optional
+
 def simulate_peg_paths(
     model: str,
     n_paths: int,
@@ -55,15 +51,8 @@ def simulate_peg_paths(
     jump_mean: float = -0.05,
     jump_std: float = 0.03,
 ) -> pd.DataFrame:
-    """
-    Dispatch to one of the OU-based peg models:
-
-    - 'basic_ou'   -> simulate_ou_peg_paths
-    - 'stress_ou'  -> simulate_stress_aware_ou_paths
-    - 'ou_jumps'   -> simulate_ou_with_jumps
-    """
     if model == "basic_ou":
-        return simulate_ou_peg_paths(
+        return peg_models.simulate_ou_peg_paths(
             n_paths=n_paths,
             n_steps=n_steps,
             T=T,
@@ -74,7 +63,7 @@ def simulate_peg_paths(
             random_seed=random_seed,
         )
     elif model == "stress_ou":
-        return simulate_stress_aware_ou_paths(
+        return peg_models.simulate_stress_aware_ou_paths(
             n_paths=n_paths,
             n_steps=n_steps,
             T=T,
@@ -87,7 +76,7 @@ def simulate_peg_paths(
             random_seed=random_seed,
         )
     elif model == "ou_jumps":
-        return simulate_ou_with_jumps(
+        return peg_models.simulate_ou_with_jumps(
             n_paths=n_paths,
             n_steps=n_steps,
             T=T,
@@ -102,6 +91,14 @@ def simulate_peg_paths(
         )
     else:
         raise ValueError(f"Unknown peg model: {model}")
+
+
+peg_model_key = st.selectbox(
+    "Peg model",
+    options=list(peg_models.PEG_MODEL_LABELS.keys()),
+    format_func=lambda k: peg_models.PEG_MODEL_LABELS[k],
+    key="peg_model_choice",
+)
 
 
 
