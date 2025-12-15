@@ -1,13 +1,20 @@
-import os
 import sys
 from pathlib import Path
+from typing import Optional
 
+
+# Ensure repo root is on sys.path so we can import `defi_risk`
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+DATA_DIR = ROOT / "data"
+
+import os
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import streamlit as st
-
-
 
 from defi_risk.simulation import simulate_gbm_price_paths, compute_lp_vs_hodl
 from defi_risk.amm_pricing import (
@@ -15,7 +22,12 @@ from defi_risk.amm_pricing import (
     lp_over_hodl_univ3,
     slippage_vs_trade_fraction,
 )
-from defi_risk.peg_models import simulate_peg_paths, PEG_MODEL_LABELS
+from defi_risk.peg_models import (
+    PEG_MODEL_LABELS,
+    simulate_ou_peg_paths,
+    simulate_stress_aware_ou_paths,
+    simulate_ou_with_jumps,
+)
 from defi_risk.peg_stress import depeg_probabilities
 from defi_risk.stablecoin import (
     simulate_mean_reverting_peg,
@@ -24,7 +36,72 @@ from defi_risk.stablecoin import (
 )
 
 
+# ---------------------------------------------------------------------
+# Local dispatcher: simulate_peg_paths
+# ---------------------------------------------------------------------
+def simulate_peg_paths(
+    model: str,
+    n_paths: int,
+    n_steps: int,
+    T: float,
+    kappa: float,
+    sigma: float,
+    p0: float = 1.0,
+    peg: float = 1.0,
+    random_seed: Optional[int] = None,
+    alpha_kappa: float = 1.0,
+    beta_sigma: float = 3.0,
+    jump_intensity: float = 0.2,
+    jump_mean: float = -0.05,
+    jump_std: float = 0.03,
+) -> pd.DataFrame:
+    """
+    Dispatch to one of the OU-based peg models:
 
+    - 'basic_ou'   -> simulate_ou_peg_paths
+    - 'stress_ou'  -> simulate_stress_aware_ou_paths
+    - 'ou_jumps'   -> simulate_ou_with_jumps
+    """
+    if model == "basic_ou":
+        return simulate_ou_peg_paths(
+            n_paths=n_paths,
+            n_steps=n_steps,
+            T=T,
+            kappa=kappa,
+            sigma=sigma,
+            p0=p0,
+            peg=peg,
+            random_seed=random_seed,
+        )
+    elif model == "stress_ou":
+        return simulate_stress_aware_ou_paths(
+            n_paths=n_paths,
+            n_steps=n_steps,
+            T=T,
+            kappa=kappa,
+            sigma=sigma,
+            alpha_kappa=alpha_kappa,
+            beta_sigma=beta_sigma,
+            p0=p0,
+            peg=peg,
+            random_seed=random_seed,
+        )
+    elif model == "ou_jumps":
+        return simulate_ou_with_jumps(
+            n_paths=n_paths,
+            n_steps=n_steps,
+            T=T,
+            kappa=kappa,
+            sigma=sigma,
+            jump_intensity=jump_intensity,
+            jump_mean=jump_mean,
+            jump_std=jump_std,
+            p0=p0,
+            peg=peg,
+            random_seed=random_seed,
+        )
+    else:
+        raise ValueError(f"Unknown peg model: {model}")
 
 
 
