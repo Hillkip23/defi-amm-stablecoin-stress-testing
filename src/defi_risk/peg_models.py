@@ -1,5 +1,3 @@
-# src/defi_risk/peg_models.py
-
 from typing import Optional, Literal, Dict
 import numpy as np
 import pandas as pd
@@ -27,11 +25,6 @@ def simulate_ou_peg_paths(
     peg: float = 1.0,
     random_seed: Optional[int] = None,
 ) -> pd.DataFrame:
-    """
-    Basic Ornstein–Uhlenbeck (OU) peg dynamics:
-
-        dp_t = kappa * (peg - p_t) dt + sigma dW_t
-    """
     if random_seed is not None:
         np.random.seed(random_seed)
 
@@ -67,15 +60,6 @@ def simulate_stress_aware_ou_paths(
     peg: float = 1.0,
     random_seed: Optional[int] = None,
 ) -> pd.DataFrame:
-    """
-    Stress-aware OU:
-
-    - Mean reversion weakens when the peg drifts far from 1
-    - Volatility increases when the peg drifts
-
-        kappa_eff = kappa / (1 + alpha_kappa * |p - peg|)
-        sigma_eff = sigma * (1 + beta_sigma * |p - peg|)
-    """
     if random_seed is not None:
         np.random.seed(random_seed)
 
@@ -117,14 +101,6 @@ def simulate_ou_with_jumps(
     peg: float = 1.0,
     random_seed: Optional[int] = None,
 ) -> pd.DataFrame:
-    """
-    OU with downward jumps (tail events):
-
-        dp_t = kappa(peg - p_t)dt + sigma dW_t + J_t
-
-    - jump_intensity: expected number of jumps per year
-    - jumps are additive, mainly negative (downward depeg shocks)
-    """
     if random_seed is not None:
         np.random.seed(random_seed)
 
@@ -141,11 +117,7 @@ def simulate_ou_with_jumps(
         drift = kappa * (peg - prev) * dt
         diffusion = sigma * np.sqrt(dt) * z
 
-        # Poisson number of jumps within dt
         n_jumps = np.random.poisson(lam=jump_intensity * dt, size=n_paths)
-
-        # If a jump occurs, draw a (mostly) downward shock
-        # lognormal-ish with negative mean
         jump_shocks = np.where(
             n_jumps > 0,
             np.random.normal(loc=jump_mean, scale=jump_std, size=n_paths),
@@ -153,8 +125,6 @@ def simulate_ou_with_jumps(
         )
 
         new_price = prev + drift + diffusion + jump_shocks
-
-        # Avoid negative / zero prices – clip at 0.1 for safety
         prices[t, :] = np.clip(new_price, 0.1, None)
 
     df = pd.DataFrame(prices, index=times)
@@ -172,19 +142,12 @@ def simulate_peg_paths(
     p0: float = 1.0,
     peg: float = 1.0,
     random_seed: Optional[int] = None,
-    # optional extra kwargs for stress / jumps
     alpha_kappa: float = 1.0,
     beta_sigma: float = 3.0,
     jump_intensity: float = 0.2,
     jump_mean: float = -0.05,
     jump_std: float = 0.03,
 ) -> pd.DataFrame:
-    """
-    Unified entry point for all peg models.
-
-    The Streamlit app should call *this* function, so adding a new
-    peg model only requires editing this file, not the UI.
-    """
     if model == "basic_ou":
         return simulate_ou_peg_paths(
             n_paths=n_paths,
@@ -225,3 +188,13 @@ def simulate_peg_paths(
         )
     else:
         raise ValueError(f"Unknown peg model: {model}")
+
+
+__all__ = [
+    "PegModelName",
+    "PEG_MODEL_LABELS",
+    "simulate_ou_peg_paths",
+    "simulate_stress_aware_ou_paths",
+    "simulate_ou_with_jumps",
+    "simulate_peg_paths",
+]

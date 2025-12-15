@@ -1,15 +1,11 @@
-
-
 import os
+import sys
 from pathlib import Path
 
-import streamlit as st
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-
-import sys
-from pathlib import Path
+import streamlit as st
 
 # Ensure src/ is on the Python path (works locally and on Streamlit Cloud)
 ROOT = Path(__file__).resolve().parents[1]
@@ -17,11 +13,22 @@ sys.path.append(str(ROOT / "src"))
 
 DATA_DIR = ROOT / "data"
 
-
 from defi_risk.simulation import simulate_gbm_price_paths, compute_lp_vs_hodl
-from defi_risk.amm_pricing import impermanent_loss, lp_over_hodl_univ3, slippage_vs_trade_fraction
-from defi_risk.peg_models import simulate_peg_paths, PEG_MODEL_LABELS, PegModelName
+from defi_risk.amm_pricing import (
+    impermanent_loss,
+    lp_over_hodl_univ3,
+    slippage_vs_trade_fraction,
+)
+# Removed PegModelName from this import
+from defi_risk.peg_models import simulate_peg_paths, PEG_MODEL_LABELS
 from defi_risk.peg_stress import depeg_probabilities
+from defi_risk.stablecoin import (
+    simulate_mean_reverting_peg,
+    slippage_curve,
+    constant_product_slippage,
+)
+
+
 
 
 # =====================================================
@@ -32,36 +39,25 @@ def load_price_series(source, max_years: int = 5) -> pd.Series:
     """
     Load a CSV (path or uploaded file) and return a cleaned daily close price
     series, trimmed to the last `max_years` years.
-
-    Handles CryptoDataDownload-style CSVs that start with a URL line.
     """
 
     def _read(**kwargs):
-        # Small helper so we can reuse the same source (path or UploadedFile)
         return pd.read_csv(source, **kwargs)
 
-    # 1) First attempt: normal read, skipping '#' comments
     df_raw = _read(comment="#")
 
-    # 2) If we only got a single column, try again skipping the first row
-    #    (this fixes CryptoDataDownload files where the first row is a URL)
     if df_raw.shape[1] < 2:
         if hasattr(source, "seek"):
-            # Reset pointer for UploadedFile / file-like objects
             source.seek(0)
         df_raw = _read(skiprows=1)
 
-    # 3) Still broken? Then give a clear error.
     if df_raw.shape[1] < 2:
         raise ValueError("CSV must have at least two columns (date & price).")
 
-    # ---- Normalisation of columns ----
     cols_lower = {c.lower(): c for c in df_raw.columns}
 
-    # Date column: try 'date', otherwise first column
     date_col = cols_lower.get("date", df_raw.columns[0])
 
-    # Price column: try common names, otherwise second column
     price_col = None
     for key in ("close", "price", "adj close", "close_usd"):
         if key in cols_lower:
@@ -74,25 +70,16 @@ def load_price_series(source, max_years: int = 5) -> pd.Series:
         columns={date_col: "date", price_col: "close"}
     )
 
-    # Parse dates, drop bad rows
     df["date"] = pd.to_datetime(df["date"], errors="coerce")
     df = df.dropna(subset=["date", "close"])
-
-    # Sort oldest → newest
     df = df.sort_values("date")
 
-    # Keep last max_years
     if max_years is not None and not df.empty:
         cutoff = df["date"].max() - pd.Timedelta(days=365 * max_years)
         df = df[df["date"] >= cutoff]
 
     df = df.set_index("date")
     return df["close"]
-
-
-
-
-
 
 def estimate_gbm_params(prices: pd.Series, trading_days: int = 252):
     """
@@ -109,24 +96,38 @@ def estimate_gbm_params(prices: pd.Series, trading_days: int = 252):
 
     return mu_annual, sigma_annual, log_ret
 
-
 # =====================================================
 # Page config
 # =====================================================
 st.set_page_config(
-    page_title="AMM LP Quant Lab",
+    page_title="DeFi AMM & Stablecoin Stress Lab",
     layout="wide",
 )
 
-st.title("AMM LP Simulation Dashboard")
+st.title("DeFi AMM & Stablecoin Stress Lab")
+st.markdown(
+    """
+This dashboard has two integrated modules:
 
+1. **AMM LP Simulation Lab** – simulates GBM price paths and evaluates
+   liquidity-provider performance (LP vs HODL, dynamic fees, Uniswap v3 ranges,
+   and stress scenarios) for generic AMMs.
+
+2. **Stablecoin Peg & Liquidity Stress Lab** – models soft-pegged stablecoins
+   with Ornstein–Uhlenbeck–type dynamics and explores how volatility and pool
+   depth shape depeg risk and AMM slippage through scenario views,
+   σ–depeg curves, and σ×reserves heatmaps.
+
+Together they provide a unified environment for studying both mechanism-level
+LP risk and stablecoin peg resilience.
+"""
+)
 
 # =====================================================
 # Sidebar: core simulation parameters
 # =====================================================
 st.sidebar.header("Simulation Parameters")
 
-# Defaults (can be overwritten by calibration)
 default_mu = float(st.session_state.get("mu_slider", 0.0))
 default_sigma = float(st.session_state.get("sigma_slider", 0.8))
 
@@ -153,17 +154,14 @@ sigma = st.sidebar.slider(
 fee_apr = st.sidebar.slider("Base Fee APR (constant model)", 0.0, 1.0, 0.1)
 p0 = 1.0
 
-# Dynamic fee model
 st.sidebar.markdown("### Dynamic Fee Model")
 fee_sensitivity = st.sidebar.slider(
     "Fee sensitivity to realized volatility", 0.0, 2.0, 0.5
 )
 
-# Uniswap v3 range
 st.sidebar.markdown("### Uniswap v3 Range (relative to P₀ = 1)")
 p_lower = st.sidebar.slider("Lower bound", 0.2, 1.0, 0.8)
 p_upper = st.sidebar.slider("Upper bound", 1.0, 5.0, 1.2)
-
 
 # =====================================================
 # Helper: run one Monte Carlo block and return (prices, summary_df)
@@ -179,7 +177,6 @@ def run_mc_block(n_paths, n_steps, T, mu, sigma, fee_apr, p0=1.0, random_seed=42
         random_seed=random_seed,
     )
 
-    # Collect terminal statistics per path
     rows = []
     for i in range(n_paths):
         df_i = compute_lp_vs_hodl(prices[[i]], fee_apr=fee_apr)
@@ -187,7 +184,6 @@ def run_mc_block(n_paths, n_steps, T, mu, sigma, fee_apr, p0=1.0, random_seed=42
 
     summary_df = pd.DataFrame(rows)
     return prices, summary_df
-
 
 # =====================================================
 # MAIN: run base simulation
@@ -208,9 +204,7 @@ if run_clicked:
         random_seed=42,
     )
 
-    # -------------------------------------------------
     # A) Base distribution: LP vs HODL (v2, static fee)
-    # -------------------------------------------------
     st.subheader("LP Performance Distribution (All Variables)")
     st.write(summary_df.describe())
 
@@ -228,9 +222,7 @@ if run_clicked:
     ax_hist.grid(True)
     st.pyplot(fig_hist)
 
-    # -------------------------------------------------
     # C) Return decomposition: IL vs dynamic fees (v2)
-    # -------------------------------------------------
     realized_vols = []
     for i in range(n_paths):
         path_prices = prices.iloc[:, i]
@@ -244,10 +236,7 @@ if run_clicked:
     dynamic_fee_apr = dynamic_fee_apr.clip(lower=0.0, upper=1.0)
     summary_df["dynamic_fee_apr"] = dynamic_fee_apr
 
-    # LP/HODL with NO fees: 1 + IL (IL negative)
     lp_no_fees = 1.0 + summary_df["impermanent_loss"]
-
-    # Add fee contribution
     summary_df["lp_over_hodl_dynamic"] = lp_no_fees + dynamic_fee_apr * T
 
     st.subheader("Summary of LP / HODL with Dynamic Fees (Uniswap v2)")
@@ -289,9 +278,7 @@ if run_clicked:
     ax_dyn.grid(True)
     st.pyplot(fig_dyn)
 
-    # -------------------------------------------------
     # B & E) Uniswap v3 concentrated LP vs HODL + range search
-    # -------------------------------------------------
     summary_df["lp_over_hodl_v3"] = summary_df["price"].apply(
         lambda p: lp_over_hodl_univ3(p, p_lower=p_lower, p_upper=p_upper)
     )
@@ -361,9 +348,7 @@ if run_clicked:
                 f"with mean LP/HODL ≈ {best_mean:.3f}"
             )
 
-    # -------------------------------------------------
-    # A) Stress scenarios: bull / bear / crab
-    # -------------------------------------------------
+    # Stress scenarios
     st.subheader("Stress Scenario Comparison (Uniswap v2, static fees)")
 
     scenarios = {
@@ -414,9 +399,7 @@ if run_clicked:
     ax_stress.grid(True, axis="y")
     st.pyplot(fig_stress)
 
-    # -------------------------------------------------
-    # D) Single-path visualizer
-    # -------------------------------------------------
+    # Single-path visualizer
     st.subheader("Single Path Visualizer")
 
     path_idx = st.number_input(
@@ -460,7 +443,6 @@ if run_clicked:
 else:
     st.info("Adjust parameters on the left and click **Run Simulation**.")
 
-
 # =====================================================
 # Real-Data Calibration (Feature E)
 # =====================================================
@@ -480,7 +462,6 @@ asset_choice = st.selectbox(
 
 prices_series = None
 
-# Map choices to local CSV paths (adjust if your files live elsewhere)
 file_map = {
     "BTC (Binance USDT, local CSV)": "data/btc_5y_daily.csv",
     "ETH (Binance USDT, local CSV)": "data/eth_5y_daily.csv",
@@ -529,14 +510,10 @@ if prices_series is not None and not prices_series.empty:
     ax_ret.set_ylabel("Frequency")
     ax_ret.grid(True)
     st.pyplot(fig_ret)
-    
-    
-        # -------------------------------------------
-    # Autocorrelation & volatility clustering
-    # -------------------------------------------
+
+    # Autocorrelation diagnostics
     st.subheader("Autocorrelation Diagnostics")
 
-    # Choose how many lags to inspect
     max_lag = st.slider(
         "Max lag (days) for autocorrelation",
         min_value=1,
@@ -548,10 +525,8 @@ if prices_series is not None and not prices_series.empty:
 
     lags = list(range(1, max_lag + 1))
 
-    # ACF of raw returns (should be near 0 for GBM)
     acf_ret = [log_ret.autocorr(lag=l) for l in lags]
 
-    # ACF of squared returns (volatility clustering shows up here)
     log_ret_sq = log_ret ** 2
     acf_sq = [log_ret_sq.autocorr(lag=l) for l in lags]
 
@@ -565,7 +540,6 @@ if prices_series is not None and not prices_series.empty:
     st.write("First few autocorrelation values:")
     st.write(acf_df.head(10))
 
-    # Plot ACF for returns
     fig_acf, ax_acf = plt.subplots()
     ax_acf.stem(lags, acf_ret, basefmt=" ")
     ax_acf.set_xlabel("Lag (days)")
@@ -574,7 +548,6 @@ if prices_series is not None and not prices_series.empty:
     ax_acf.grid(True)
     st.pyplot(fig_acf)
 
-    # Plot ACF for squared returns (volatility clustering)
     fig_acf2, ax_acf2 = plt.subplots()
     ax_acf2.stem(lags, acf_sq, basefmt=" ")
     ax_acf2.set_xlabel("Lag (days)")
@@ -583,9 +556,6 @@ if prices_series is not None and not prices_series.empty:
     ax_acf2.grid(True)
     st.pyplot(fig_acf2)
 
-    # -------------------------------------------
-    # Rolling volatility (visual volatility clustering)
-    # -------------------------------------------
     st.subheader("Rolling Volatility (annualized)")
 
     roll_window = st.selectbox(
@@ -600,7 +570,6 @@ if prices_series is not None and not prices_series.empty:
 
     st.line_chart(rolling_vol.rename("Rolling σ (annualized)"))
 
-
     if st.button("Use these parameters for simulation"):
         st.session_state["mu_slider"] = float(mu_hat)
         st.session_state["sigma_slider"] = float(sigma_hat)
@@ -608,20 +577,6 @@ if prices_series is not None and not prices_series.empty:
         st.experimental_rerun()
 else:
     st.info("Select an asset and/or upload a CSV to run calibration.")
-
-import matplotlib.pyplot as plt 
-import numpy as np 
-import pandas as pd 
-import streamlit as st 
-from defi_risk.stablecoin import ( simulate_mean_reverting_peg, slippage_curve, constant_product_slippage, )
-
-
-
-
-# =====================================================
-# 🪙 Stablecoin Peg & Liquidity Stress Lab (OU + AMM)
-# =====================================================
-
 
 # =====================================================
 # 🪙 Stablecoin Peg & Liquidity Stress Lab (OU + AMM)
@@ -642,29 +597,20 @@ Use the tabs below to explore:
 """
 )
 
-
 def load_grid_csv():
-    """
-    Load the precomputed σ × reserves depeg grid.
-
-    Uses DATA_DIR so it works both locally and on Streamlit Cloud.
-    """
     csv_path = DATA_DIR / "peg_liquidity_grid.csv"
     if not csv_path.exists():
         return None
     return pd.read_csv(csv_path)
 
-
 tab1, tab2, tab3 = st.tabs(
     ["Scenario explorer", "Depeg vs volatility (σ)", "Heatmap: σ × reserves"]
 )
 
-# ---------------------------------------------
 # TAB 1 – Scenario explorer (OU + slippage)
-# ---------------------------------------------
 with tab1:
-    # Peg model choice (drives which SDE we simulate)
-    peg_model_key: PegModelName = st.selectbox(
+    # removed PegModelName type annotation
+    peg_model_key = st.selectbox(
         "Peg model",
         options=list(PEG_MODEL_LABELS.keys()),
         format_func=lambda k: PEG_MODEL_LABELS[k],
@@ -727,7 +673,6 @@ with tab1:
     run_peg = st.button("Run stablecoin scenario")
 
     if run_peg:
-        # All peg models go through the same unified interface
         prices_peg = simulate_peg_paths(
             model=peg_model_key,
             n_paths=n_paths_peg,
@@ -738,7 +683,6 @@ with tab1:
             p0=p0_peg,
             peg=peg_target,
             random_seed=seed_peg,
-            # default stress / jump params; can expose via UI later if desired
             alpha_kappa=1.0,
             beta_sigma=3.0,
             jump_intensity=0.2,
@@ -798,7 +742,6 @@ with tab1:
             ax3.set_ylabel("Slippage (%)")
             ax3.grid(True)
 
-            # highlight chosen trade size
             highlight = slip_df.iloc[
                 (slip_df["trade_pct"] - highlight_trade_pct).abs().argmin()
             ]
@@ -810,9 +753,7 @@ with tab1:
                 f"slippage ≈ **{highlight['slippage_pct']:.2f}%**"
             )
 
-# ---------------------------------------------
 # TAB 2 – Depeg probability vs σ
-# ---------------------------------------------
 with tab2:
     st.subheader("Depeg Probability vs Volatility σ")
 
@@ -839,7 +780,7 @@ with tab2:
     rows = []
     for s in sigma_grid:
         prices_s = simulate_peg_paths(
-            model="basic_ou",  # use baseline OU for this curve
+            model="basic_ou",
             n_paths=n_paths_peg,
             n_steps=n_steps_peg,
             T=T_peg,
@@ -859,7 +800,7 @@ with tab2:
     sigma_df = pd.DataFrame(rows)
 
     fig4, ax4 = plt.subplots()
-    for col in ["p_T<0.99", "p_T<0.95", "p_T<0.9"]:
+    for col in ["p_T<0.99", "p_T<0.95", "p_T<0.90"]:
         if col in sigma_df.columns:
             ax4.plot(sigma_df["sigma"], sigma_df[col], marker="o", label=col)
     ax4.set_xlabel("Volatility σ")
@@ -871,9 +812,7 @@ with tab2:
 
     st.dataframe(sigma_df)
 
-# ---------------------------------------------
 # TAB 3 – Heatmap σ × reserves
-# ---------------------------------------------
 with tab3:
     st.subheader("Depeg Probability Heatmap (σ × reserves)")
 
@@ -939,11 +878,3 @@ with tab3:
 
         st.markdown("Underlying grid data:")
         st.dataframe(dfh.reset_index(drop=True))
-
-
-
-
-
-
-
-
