@@ -2,7 +2,6 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-
 # Ensure repo root is on sys.path so we can import `defi_risk`
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -22,85 +21,13 @@ from defi_risk.amm_pricing import (
     lp_over_hodl_univ3,
     slippage_vs_trade_fraction,
 )
-import defi_risk.peg_models as peg_models
-
+from defi_risk.peg_models import PEG_MODEL_LABELS, simulate_peg_paths
 from defi_risk.peg_stress import depeg_probabilities
 from defi_risk.stablecoin import (
     simulate_mean_reverting_peg,
     slippage_curve,
     constant_product_slippage,
 )
-
-
-# ---------------------------------------------------------------------
-from typing import Optional
-
-def simulate_peg_paths(
-    model: str,
-    n_paths: int,
-    n_steps: int,
-    T: float,
-    kappa: float,
-    sigma: float,
-    p0: float = 1.0,
-    peg: float = 1.0,
-    random_seed: Optional[int] = None,
-    alpha_kappa: float = 1.0,
-    beta_sigma: float = 3.0,
-    jump_intensity: float = 0.2,
-    jump_mean: float = -0.05,
-    jump_std: float = 0.03,
-) -> pd.DataFrame:
-    if model == "basic_ou":
-        return peg_models.simulate_ou_peg_paths(
-            n_paths=n_paths,
-            n_steps=n_steps,
-            T=T,
-            kappa=kappa,
-            sigma=sigma,
-            p0=p0,
-            peg=peg,
-            random_seed=random_seed,
-        )
-    elif model == "stress_ou":
-        return peg_models.simulate_stress_aware_ou_paths(
-            n_paths=n_paths,
-            n_steps=n_steps,
-            T=T,
-            kappa=kappa,
-            sigma=sigma,
-            alpha_kappa=alpha_kappa,
-            beta_sigma=beta_sigma,
-            p0=p0,
-            peg=peg,
-            random_seed=random_seed,
-        )
-    elif model == "ou_jumps":
-        return peg_models.simulate_ou_with_jumps(
-            n_paths=n_paths,
-            n_steps=n_steps,
-            T=T,
-            kappa=kappa,
-            sigma=sigma,
-            jump_intensity=jump_intensity,
-            jump_mean=jump_mean,
-            jump_std=jump_std,
-            p0=p0,
-            peg=peg,
-            random_seed=random_seed,
-        )
-    else:
-        raise ValueError(f"Unknown peg model: {model}")
-
-
-peg_model_key = st.selectbox(
-    "Peg model",
-    options=list(peg_models.PEG_MODEL_LABELS.keys()),
-    format_func=lambda k: peg_models.PEG_MODEL_LABELS[k],
-    key="peg_model_choice",
-)
-
-
 
 # =====================================================
 # Helpers for calibration
@@ -151,6 +78,7 @@ def load_price_series(source, max_years: int = 5) -> pd.Series:
 
     df = df.set_index("date")
     return df["close"]
+
 
 def estimate_gbm_params(prices: pd.Series, trading_days: int = 252):
     """
@@ -680,7 +608,6 @@ tab1, tab2, tab3 = st.tabs(
 
 # TAB 1 – Scenario explorer (OU + slippage)
 with tab1:
-    # removed PegModelName type annotation
     peg_model_key = st.selectbox(
         "Peg model",
         options=list(PEG_MODEL_LABELS.keys()),
