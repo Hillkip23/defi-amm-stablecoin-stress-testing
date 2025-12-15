@@ -9,23 +9,12 @@ import streamlit as st
 
 
 
-ROOT = Path(__file__).resolve().parents[1]
-SRC = ROOT / "src"
-
-# Ensure local src/ is first on sys.path so we use this repo's defi_risk
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
-
-DATA_DIR = ROOT / "data"
-
-
 from defi_risk.simulation import simulate_gbm_price_paths, compute_lp_vs_hodl
 from defi_risk.amm_pricing import (
     impermanent_loss,
     lp_over_hodl_univ3,
     slippage_vs_trade_fraction,
 )
-# Removed PegModelName from this import
 from defi_risk.peg_models import simulate_peg_paths, PEG_MODEL_LABELS
 from defi_risk.peg_stress import depeg_probabilities
 from defi_risk.stablecoin import (
@@ -33,6 +22,8 @@ from defi_risk.stablecoin import (
     slippage_curve,
     constant_product_slippage,
 )
+
+
 
 
 
