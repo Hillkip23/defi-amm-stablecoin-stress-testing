@@ -1,16 +1,20 @@
+
+
+
 from typing import Optional
+import sys
+from pathlib import Path
+
+# Ensure repo root is on sys.path so we can import `defi_risk`
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 import os
 import streamlit as st
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-
-import sys
-from pathlib import Path
-
-# Ensure src/ is on the Python path (works locally and on Streamlit Cloud)
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.append(str(ROOT / "src"))
 
 from defi_risk.simulation import simulate_gbm_price_paths, compute_lp_vs_hodl
 from defi_risk.amm_pricing import (
@@ -22,11 +26,12 @@ from defi_risk.stablecoin import (
     slippage_curve,
     constant_product_slippage,
 )
-from defi_risk.peg_models import simulate_ou_peg_paths  # ✅ basic OU peg
+from defi_risk.peg_models import simulate_ou_peg_paths  # if still used
+
 
 
 # =====================================================
-# Helpers for calibration
+# Helpers for
 # =====================================================
 
 def load_price_series(source, max_years: int = 5) -> pd.Series:
