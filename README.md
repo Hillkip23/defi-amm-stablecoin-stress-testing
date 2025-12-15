@@ -18,6 +18,8 @@ Explore stablecoin peg dynamics, depeg probabilities, and liquidity-driven slipp
 
 👉 https://hillkip23-defi-amm-stablecoin-stress-t-appstablecoin-app-yfedl4.streamlit.app/
 
+https://hillkip23-defi-amm-stablecoin-stress-t-appstablecoin-app-yfedl4.streamlit.app/
+
 ---
 
 ## Why this matters (non-quant version)
