@@ -7,11 +7,17 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-# Ensure src/ is on the Python path (works locally and on Streamlit Cloud)
+
+
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.append(str(ROOT / "src"))
+SRC = ROOT / "src"
+
+# Ensure local src/ is first on sys.path so we use this repo's defi_risk
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
 
 DATA_DIR = ROOT / "data"
+
 
 from defi_risk.simulation import simulate_gbm_price_paths, compute_lp_vs_hodl
 from defi_risk.amm_pricing import (
