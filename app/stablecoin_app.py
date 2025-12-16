@@ -29,9 +29,11 @@ from defi_risk.stablecoin import (
     constant_product_slippage,
 )
 
+
 # =====================================================
 # Helpers for calibration
 # =====================================================
+
 
 def load_price_series(source, max_years: int = 5) -> pd.Series:
     """
@@ -95,6 +97,7 @@ def estimate_gbm_params(prices: pd.Series, trading_days: int = 252):
 
     return mu_annual, sigma_annual, log_ret
 
+
 # =====================================================
 # Page config
 # =====================================================
@@ -102,6 +105,13 @@ st.set_page_config(
     page_title="DeFi AMM & Stablecoin Stress Lab",
     layout="wide",
 )
+
+# Initialize GBM slider state before widgets
+if "mu_slider" not in st.session_state:
+    st.session_state.mu_slider = 0.0
+
+if "sigma_slider" not in st.session_state:
+    st.session_state.sigma_slider = 0.8
 
 st.title("DeFi AMM & Stablecoin Stress Lab")
 st.markdown(
@@ -121,6 +131,7 @@ Together they provide a unified environment for studying both mechanism-level
 LP risk and stablecoin peg resilience.
 """
 )
+
 
 # =====================================================
 # Sidebar: core simulation parameters
@@ -162,6 +173,7 @@ st.sidebar.markdown("### Uniswap v3 Range (relative to P₀ = 1)")
 p_lower = st.sidebar.slider("Lower bound", 0.2, 1.0, 0.8)
 p_upper = st.sidebar.slider("Upper bound", 1.0, 5.0, 1.2)
 
+
 # =====================================================
 # Helper: run one Monte Carlo block and return (prices, summary_df)
 # =====================================================
@@ -183,6 +195,7 @@ def run_mc_block(n_paths, n_steps, T, mu, sigma, fee_apr, p0=1.0, random_seed=42
 
     summary_df = pd.DataFrame(rows)
     return prices, summary_df
+
 
 # =====================================================
 # MAIN: run base simulation
@@ -442,6 +455,7 @@ if run_clicked:
 else:
     st.info("Adjust parameters on the left and click **Run Simulation**.")
 
+
 # =====================================================
 # Real-Data Calibration (Feature E)
 # =====================================================
@@ -569,19 +583,32 @@ if prices_series is not None and not prices_series.empty:
 
     st.line_chart(rolling_vol.rename("Rolling σ (annualized)"))
 
-    if st.button("Use these parameters for simulation"):
-        st.session_state["mu_slider"] = float(mu_hat)
-        st.session_state["sigma_slider"] = float(sigma_hat)
+    # Callback to apply calibrated params to sliders
+    def apply_calibrated_params():
+        st.session_state.mu_slider = float(mu_hat)
+        st.session_state.sigma_slider = float(sigma_hat)
+        st.session_state["calibration_applied"] = True
+
+    st.button(
+        "Use these parameters for simulation",
+        on_click=apply_calibrated_params,
+        key="apply_calibrated_params_btn",
+    )
+
+    if st.session_state.get("calibration_applied", False):
         st.success("Updated Drift μ and Volatility σ sliders from calibration.")
-        st.experimental_rerun()
+
 else:
     st.info("Select an asset and/or upload a CSV to run calibration.")
+
 
 # =====================================================
 # 🪙 Stablecoin Peg & Liquidity Stress Lab (OU + AMM)
 # =====================================================
 
+
 st.header("🪙 Stablecoin Peg & Liquidity Stress Lab")
+
 
 st.markdown(
     """
@@ -596,15 +623,18 @@ Use the tabs below to explore:
 """
 )
 
+
 def load_grid_csv():
     csv_path = DATA_DIR / "peg_liquidity_grid.csv"
     if not csv_path.exists():
         return None
     return pd.read_csv(csv_path)
 
+
 tab1, tab2, tab3 = st.tabs(
     ["Scenario explorer", "Depeg vs volatility (σ)", "Heatmap: σ × reserves"]
 )
+
 
 # TAB 1 – Scenario explorer (OU + slippage)
 with tab1:
@@ -751,6 +781,7 @@ with tab1:
                 f"slippage ≈ **{highlight['slippage_pct']:.2f}%**"
             )
 
+
 # TAB 2 – Depeg probability vs σ
 with tab2:
     st.subheader("Depeg Probability vs Volatility σ")
@@ -809,6 +840,7 @@ with tab2:
     st.pyplot(fig4)
 
     st.dataframe(sigma_df)
+
 
 # TAB 3 – Heatmap σ × reserves
 with tab3:
