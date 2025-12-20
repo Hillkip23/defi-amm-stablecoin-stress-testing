@@ -2,8 +2,6 @@
 
 This repository accompanies the paper **“Stress Testing DeFi AMMs and Stablecoins Under Volatility and Liquidity Shocks”** (Cheruiyot, 2025) and the live **DeFi AMM & Stablecoin Stress Lab** Streamlit app. The project provides a unified, reproducible framework for stress testing automated market makers (AMMs) and soft‑pegged stablecoins using empirically calibrated stochastic models and interactive dashboards.
 
----
-
 ## Live Streamlit Lab
 
 **DeFi AMM & Stablecoin Stress Lab**  
@@ -18,7 +16,6 @@ The app exposes:
 
 All results in the paper are generated directly from this codebase via export scripts and are reproducible from the Streamlit interface.
 
----
 
 ## Research Overview
 
@@ -34,7 +31,6 @@ Key elements:
 - AMMs use **constant‑product pricing** with fee income, impermanent loss, and slippage fully modeled; concentrated‑liquidity ranges are analysed via grid search over price bands.  
 - Stress surfaces over volatility and liquidity reveal sharp **phase transitions** in LP/HODL performance and peg stability that do not appear in average‑condition analyses.
 
----
 
 ## Main Features
 
@@ -61,7 +57,7 @@ Key elements:
   2. Compute deviations \( x_t = p_t - 1 \).  
   3. Fit AR(1) \( x_{t+1} = a + b x_t + \varepsilon_t \).  
   4. Map to OU: \( \kappa = -\ln b \), \( \mu = 1 + a/(1-b) \), \( \sigma \) from residual variance.  
-  Dashboard button “Use USDC (Dune) for OU parameters” pre‑loads \( \mu \approx 1.0006, \sigma \approx 0.0021, \kappa \approx 0.55 \) (half‑life ≈ 1.3 days) [file:248].
+  Dashboard button “Use USDC (Dune) for OU parameters” pre‑loads \( \mu \approx 1.0006, \sigma \approx 0.0021, \kappa \approx 0.55 \) (half‑life ≈ 1.3 days).
 
 - **Depeg severity metrics** computed over simulated paths:
   - Depeg probability \( \mathbb{P}(p_T < \theta) \)  
@@ -70,9 +66,7 @@ Key elements:
   - Time‑under‑peg \( \frac{1}{T}\int_0^T 1_{\{p_t < \theta\}} dt \)  
   - Worst‑case deviation \( \min_{t \in [0,T]} p_t \).
 
-- Stress surfaces and heatmaps over volatility σ and pool reserves R highlight nonlinear transitions where mild depegs become frequent and severe once σ crosses critical bands [file:248].
-
----
+- Stress surfaces and heatmaps over volatility σ and pool reserves R highlight nonlinear transitions where mild depegs become frequent and severe once σ crosses critical bands.
 
 ## Repository Structure
 
@@ -88,7 +82,6 @@ Core modules (names may vary slightly with the actual repo):
 
 All figures and tables in the paper are produced from this code via reproducible experiment scripts.
 
----
 
 ## Getting Started
 
@@ -99,7 +92,6 @@ cd defi-amm-stablecoin-stress-testing
 python -m venv venv
 source venv/bin/activate # Windows: venv\Scripts\activate
 pip install -r requirements.txt
-
 
 
 ### Using the Streamlit Lab
@@ -113,22 +105,3 @@ pip install -r requirements.txt
 
 
 
-
-
-
-
-
-
-
-
-
-
-Scenario analysis
-
-Risk intuition building
-
-Protocol design exploration
-
-Education and research
-
-Not intended for live trading or financial advice.
