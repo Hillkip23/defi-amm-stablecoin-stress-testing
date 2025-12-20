@@ -1,3 +1,5 @@
+# app/stablecoin_app.py
+
 import sys
 from pathlib import Path
 from typing import Optional
@@ -22,25 +24,26 @@ from defi_risk.amm_pricing import (
     slippage_vs_trade_fraction,
 )
 from defi_risk.peg_models import PEG_MODEL_LABELS, simulate_peg_paths
-from defi_risk.peg_stress import depeg_probabilities
+from defi_risk.peg_stress import depeg_probabilities, depeg_severity_metrics
 from defi_risk.stablecoin import (
     simulate_mean_reverting_peg,
     slippage_curve,
     constant_product_slippage,
 )
-
+from defi_risk.dune_client import (
+    get_uniswap_eth_usdc_daily_prices,
+    get_usdc_daily_prices,
+)
 
 # =====================================================
 # Helpers for calibration
 # =====================================================
-
 
 def load_price_series(source, max_years: int = 5) -> pd.Series:
     """
     Load a CSV (path or uploaded file) and return a cleaned daily close price
     series, trimmed to the last `max_years` years.
     """
-
     def _read(**kwargs):
         return pd.read_csv(source, **kwargs)
 
@@ -55,7 +58,6 @@ def load_price_series(source, max_years: int = 5) -> pd.Series:
         raise ValueError("CSV must have at least two columns (date & price).")
 
     cols_lower = {c.lower(): c for c in df_raw.columns}
-
     date_col = cols_lower.get("date", df_raw.columns[0])
 
     price_col = None
@@ -98,6 +100,35 @@ def estimate_gbm_params(prices: pd.Series, trading_days: int = 252):
     return mu_annual, sigma_annual, log_ret
 
 
+def calibrate_ou_from_usdc_prices(prices: pd.Series) -> dict:
+    """
+    Estimate OU parameters (mu, sigma, kappa) from a USDC price series around 1.
+    Treat deviations from 1 as an AR(1) and map to continuous-time OU.
+    """
+    x = prices.dropna().astype(float).values - 1.0
+    if len(x) < 2:
+        return {"mu": 1.0, "sigma": 0.01, "kappa": 1.0}
+
+    dt = 1.0  # daily
+    x_t = x[:-1]
+    x_tp1 = x[1:]
+
+    # AR(1): x_{t+1} = a + b x_t + eps
+    b = np.sum(x_t * x_tp1) / np.sum(x_t * x_t)
+    a = np.mean(x_tp1 - b * x_t)
+    residuals = x_tp1 - (a + b * x_t)
+    sigma_eps = np.std(residuals, ddof=1)
+
+    # Map AR(1) to OU parameters: κ, μ, σ.
+    kappa = -np.log(b) / dt if 0.0 < b < 1.0 else 1.0
+    mu_dev = a / (1.0 - b) if abs(1.0 - b) > 1e-6 else 0.0
+    mu = 1.0 + mu_dev
+    sigma = sigma_eps * np.sqrt(
+        2.0 * kappa / (1.0 - np.exp(-2.0 * kappa * dt))
+    )
+
+    return {"mu": float(mu), "sigma": float(sigma), "kappa": float(kappa)}
+
 # =====================================================
 # Page config
 # =====================================================
@@ -114,24 +145,58 @@ if "sigma_slider" not in st.session_state:
     st.session_state.sigma_slider = 0.8
 
 st.title("DeFi AMM & Stablecoin Stress Lab")
-st.markdown(
-    """
-This dashboard has two integrated modules:
 
-1. **AMM LP Simulation Lab** – simulates GBM price paths and evaluates
-   liquidity-provider performance (LP vs HODL, dynamic fees, Uniswap v3 ranges,
-   and stress scenarios) for generic AMMs.
+# ---- About / model overview ----
+with st.expander("About this lab / model overview", expanded=True):
+    st.markdown(
+        """
+This lab combines **DeFi AMM risk** and **stablecoin peg stress testing** in a single,
+fully reproducible environment.
 
-2. **Stablecoin Peg & Liquidity Stress Lab** – models soft-pegged stablecoins
-   with Ornstein–Uhlenbeck–type dynamics and explores how volatility and pool
-   depth shape depeg risk and AMM slippage through scenario views,
-   σ–depeg curves, and σ×reserves heatmaps.
+**What this app does**
 
-Together they provide a unified environment for studying both mechanism-level
-LP risk and stablecoin peg resilience.
+- Simulates GBM price paths and evaluates LP vs HODL performance (including dynamic fees).
+- Models soft-pegged stablecoins with OU, stress-aware OU, and OU-with-jumps dynamics.
+- Quantifies not just *if* a stablecoin depegs, but *how severely* and *for how long*.
+- Maps depeg and LP risk across volatility × liquidity surfaces.
+- Links interactive simulations directly to the empirical calibrations used in the paper.
+
+**Key questions it answers**
+
+- When does LP provision remain attractive vs simply holding the asset?
+- How much volatility and how little liquidity does it take to break a peg?
+- How do dynamic v2-style fees compare to static concentrated v3 ranges for LPs?
 """
-)
+    )
 
+# ---- Parameter documentation ----
+with st.expander("Parameter documentation"):
+    st.markdown(
+        """
+**μ (Drift)**: Annualized expected return of the risky asset (GBM).
+
+**σ (Volatility)**: Annualized standard deviation of returns.
+
+**κ (Mean reversion speed)**: How quickly the stablecoin price is pulled back to its peg in OU models.
+
+**Fee APR**: Annualized trading fee yield earned by LPs (before IL and volatility).
+"""
+    )
+
+# =====================================================
+# LP quick presets (must come BEFORE sliders)
+# =====================================================
+st.markdown("#### Quick LP scenario presets")
+lp_preset_col1, lp_preset_col2 = st.columns(2)
+with lp_preset_col1:
+    if st.button("Dynamic v2 vs static v3 (baseline)", key="lp_preset_baseline"):
+        st.session_state.mu_slider = 0.0
+        st.session_state.sigma_slider = 0.8
+
+with lp_preset_col2:
+    if st.button("High-volatility LP stress", key="lp_preset_stress"):
+        st.session_state.mu_slider = 0.0
+        st.session_state.sigma_slider = 1.2
 
 # =====================================================
 # Sidebar: core simulation parameters
@@ -173,7 +238,6 @@ st.sidebar.markdown("### Uniswap v3 Range (relative to P₀ = 1)")
 p_lower = st.sidebar.slider("Lower bound", 0.2, 1.0, 0.8)
 p_upper = st.sidebar.slider("Upper bound", 1.0, 5.0, 1.2)
 
-
 # =====================================================
 # Helper: run one Monte Carlo block and return (prices, summary_df)
 # =====================================================
@@ -196,6 +260,10 @@ def run_mc_block(n_paths, n_steps, T, mu, sigma, fee_apr, p0=1.0, random_seed=42
     summary_df = pd.DataFrame(rows)
     return prices, summary_df
 
+@st.cache_data
+def run_mc_block_cached(n_paths, n_steps, T, mu, sigma, fee_apr, p0=1.0, random_seed=42):
+    """Cached version of the Monte Carlo simulation."""
+    return run_mc_block(n_paths, n_steps, T, mu, sigma, fee_apr, p0, random_seed)
 
 # =====================================================
 # MAIN: run base simulation
@@ -203,18 +271,19 @@ def run_mc_block(n_paths, n_steps, T, mu, sigma, fee_apr, p0=1.0, random_seed=42
 run_clicked = st.button("Run Simulation")
 
 if run_clicked:
-    st.write("Running simulations...")
-
-    prices, summary_df = run_mc_block(
-        n_paths=n_paths,
-        n_steps=n_steps,
-        T=T,
-        mu=mu,
-        sigma=sigma,
-        fee_apr=fee_apr,
-        p0=p0,
-        random_seed=42,
-    )
+    progress_bar = st.progress(0)
+    with st.spinner("Running simulations..."):
+        prices, summary_df = run_mc_block_cached(
+            n_paths=n_paths,
+            n_steps=n_steps,
+            T=T,
+            mu=mu,
+            sigma=sigma,
+            fee_apr=fee_apr,
+            p0=p0,
+            random_seed=42,
+        )
+        progress_bar.progress(100)
 
     # A) Base distribution: LP vs HODL (v2, static fee)
     st.subheader("LP Performance Distribution (All Variables)")
@@ -250,6 +319,16 @@ if run_clicked:
 
     lp_no_fees = 1.0 + summary_df["impermanent_loss"]
     summary_df["lp_over_hodl_dynamic"] = lp_no_fees + dynamic_fee_apr * T
+
+    # CSV download for LP simulation results
+    if not summary_df.empty:
+        csv = summary_df.to_csv(index=False)
+        st.download_button(
+            label="Download LP simulation results as CSV",
+            data=csv,
+            file_name="lp_simulation_results.csv",
+            mime="text/csv",
+        )
 
     st.subheader("Summary of LP / HODL with Dynamic Fees (Uniswap v2)")
     lp_dyn_stats = summary_df["lp_over_hodl_dynamic"].describe(
@@ -289,6 +368,7 @@ if run_clicked:
     ax_dyn.set_ylabel("Frequency")
     ax_dyn.grid(True)
     st.pyplot(fig_dyn)
+
 
     # B & E) Uniswap v3 concentrated LP vs HODL + range search
     summary_df["lp_over_hodl_v3"] = summary_df["price"].apply(
@@ -456,9 +536,11 @@ else:
     st.info("Adjust parameters on the left and click **Run Simulation**.")
 
 
+
 # =====================================================
-# Real-Data Calibration (Feature E)
+# Real-Data Calibration (GBM from Historical Prices)
 # =====================================================
+
 st.header("Real-Data Calibration (GBM from Historical Prices)")
 
 asset_choice = st.selectbox(
@@ -469,6 +551,7 @@ asset_choice = st.selectbox(
         "UNI (Binance USDT, local CSV)",
         "XRP (Binance USDT, local CSV)",
         "S&P 500 (^SPX, local CSV)",
+        "ETH (on-chain, Dune prices.usd)",
         "Upload custom CSV...",
     ],
 )
@@ -493,6 +576,13 @@ if asset_choice == "Upload custom CSV...":
             prices_series = load_price_series(uploaded)
         except Exception as e:
             st.error(f"Could not read uploaded file: {e}")
+
+elif asset_choice == "ETH (on-chain, Dune prices.usd)":
+    try:
+        prices_series = get_uniswap_eth_usdc_daily_prices()
+    except Exception as e:
+        st.error(f"Could not fetch on-chain prices from Dune: {e}")
+
 else:
     path = file_map[asset_choice]
     if os.path.exists(path):
@@ -601,14 +691,11 @@ if prices_series is not None and not prices_series.empty:
 else:
     st.info("Select an asset and/or upload a CSV to run calibration.")
 
-
 # =====================================================
-# 🪙 Stablecoin Peg & Liquidity Stress Lab (OU + AMM)
+# Stablecoin Peg & Liquidity Stress Lab (OU + AMM)
 # =====================================================
-
 
 st.header("🪙 Stablecoin Peg & Liquidity Stress Lab")
-
 
 st.markdown(
     """
@@ -623,18 +710,15 @@ Use the tabs below to explore:
 """
 )
 
-
 def load_grid_csv():
     csv_path = DATA_DIR / "peg_liquidity_grid.csv"
     if not csv_path.exists():
         return None
     return pd.read_csv(csv_path)
 
-
 tab1, tab2, tab3 = st.tabs(
     ["Scenario explorer", "Depeg vs volatility (σ)", "Heatmap: σ × reserves"]
 )
-
 
 # TAB 1 – Scenario explorer (OU + slippage)
 with tab1:
@@ -665,7 +749,77 @@ with tab1:
         )
         p0_peg = st.slider("Initial price p₀", 0.90, 1.10, 1.00, key="peg_p0")
         peg_target = 1.0
+
+        # --- Quick preset scenarios for peg dynamics ---
+        st.markdown("#### Quick preset scenarios")
+        col_presets = st.columns(3)
+
+        with col_presets[0]:
+            if st.button("USDC baseline (on-chain)", key="preset_usdc"):
+                st.session_state["peg_kappa"] = 5.0
+                st.session_state["peg_sigma"] = 0.002
+                st.session_state["peg_p0"] = 1.0006
+
+        with col_presets[1]:
+            if st.button("High-volatility peg stress", key="preset_stress"):
+                st.session_state["peg_kappa"] = 3.0
+                st.session_state["peg_sigma"] = 0.05
+                st.session_state["peg_p0"] = 1.0
+
+        with col_presets[2]:
+            if st.button("OU with jumps stress", key="preset_jumps"):
+                st.session_state["peg_kappa"] = 3.0
+                st.session_state["peg_sigma"] = 0.03
+                st.session_state["peg_p0"] = 1.0
+                st.session_state["peg_beta_sigma"] = 3.0
+                st.session_state["peg_jump_intensity"] = 0.3
+                st.session_state["peg_jump_mean"] = -0.08
+                st.session_state["peg_jump_std"] = 0.04
+
+        # Stress model parameters
+        st.markdown("#### Stress Model Parameters")
+        beta_sigma = st.slider(
+            "Stress Amplification (β)",
+            0.0, 10.0, 3.0,
+            key="peg_beta_sigma",
+            help="Controls how much volatility increases with peg deviation (for stress-aware OU).",
+        )
+
+        st.markdown("#### Jump Process Parameters (for 'OU with jumps')")
+        jump_intensity = st.slider(
+            "Jump Intensity (λ)", 0.0, 1.0, 0.2, key="peg_jump_intensity"
+        )
+        jump_mean = st.slider(
+            "Jump Mean", -0.1, 0.0, -0.05, key="peg_jump_mean"
+        )
+        jump_std = st.slider(
+            "Jump Std Dev", 0.0, 0.1, 0.03, key="peg_jump_std"
+        )
+
         seed_peg = 42
+
+        # Calibrate from USDC on-chain prices via Dune prices.usd.
+        st.markdown("#### Calibrate from USDC on-chain prices (Dune)")
+        if st.button("Use USDC (Dune) for OU parameters", key="usdc_calib_btn"):
+            try:
+                usdc_prices = get_usdc_daily_prices()
+                params = calibrate_ou_from_usdc_prices(usdc_prices)
+                kappa_peg = params["kappa"]
+                sigma_peg = params["sigma"]
+                p0_peg = params["mu"]
+                st.success(
+                    f"Calibrated from USDC: μ≈{p0_peg:.4f}, σ≈{sigma_peg:.4f}, κ≈{kappa_peg:.2f}"
+                )
+            except Exception as e:
+                st.error(f"USDC calibration failed: {e}")
+
+        # Severity threshold slider
+        severity_threshold = st.slider(
+            "Severity Threshold (θ)",
+            0.90, 1.00, 0.99,
+            key="peg_severity_threshold",
+            help="Threshold used to compute depeg severity metrics.",
+        )
 
     with col_right:
         st.subheader("AMM Pool & Trade Stress")
@@ -701,6 +855,7 @@ with tab1:
     run_peg = st.button("Run stablecoin scenario")
 
     if run_peg:
+        # 1. Run Simulation
         prices_peg = simulate_peg_paths(
             model=peg_model_key,
             n_paths=n_paths_peg,
@@ -712,14 +867,20 @@ with tab1:
             peg=peg_target,
             random_seed=seed_peg,
             alpha_kappa=1.0,
-            beta_sigma=3.0,
-            jump_intensity=0.2,
-            jump_mean=-0.05,
-            jump_std=0.03,
+            beta_sigma=beta_sigma,
+            jump_intensity=jump_intensity,
+            jump_mean=jump_mean,
+            jump_std=jump_std,
         )
 
+        # 2. Standard depeg probabilities
         ou_probs = depeg_probabilities(
             prices_peg, thresholds=(0.99, 0.95, 0.90)
+        )
+
+        # 3. Full severity metrics at chosen θ
+        severity_results = depeg_severity_metrics(
+            prices_peg, threshold=severity_threshold
         )
 
         c1, c2 = st.columns(2)
@@ -744,7 +905,32 @@ with tab1:
             st.pyplot(fig2)
 
         with c2:
-            st.subheader("Depeg Probabilities (OU)")
+            st.subheader("Depeg Severity Metrics (OU)")
+            severity_rows = [
+                {
+                    "Metric": "Expected Shortfall (E[θ - p_T]^+)",
+                    "Value": f"{severity_results['expected_shortfall']:.4f}",
+                },
+                {
+                    "Metric": "Conditional Shortfall (E[θ - p_T | p_T < θ])",
+                    "Value": f"{severity_results['conditional_shortfall']:.4f}",
+                },
+                {
+                    "Metric": f"Time Under Peg (θ = {severity_threshold:.2f})",
+                    "Value": f"{severity_results['time_under_peg'] * 100:.2f}%",
+                },
+                {
+                    "Metric": "Worst Case Deviation (min p_t)",
+                    "Value": f"{severity_results['worst_case_deviation']:.4f}",
+                },
+                {
+                    "Metric": f"Depeg Probability (p_T < {severity_threshold:.2f})",
+                    "Value": f"{severity_results['depeg_probability'] * 100:.2f}%",
+                },
+            ]
+            st.table(pd.DataFrame(severity_rows))
+
+            st.subheader("Depeg Probabilities (Standard Thresholds)")
             rows = []
             for thr in (0.99, 0.95, 0.90):
                 key = f"p_T<{thr}"
@@ -780,7 +966,6 @@ with tab1:
                 f"Highlighted trade ≈ **{highlight['trade_pct']:.1f}%** of reserves → "
                 f"slippage ≈ **{highlight['slippage_pct']:.2f}%**"
             )
-
 
 # TAB 2 – Depeg probability vs σ
 with tab2:
@@ -841,7 +1026,6 @@ with tab2:
 
     st.dataframe(sigma_df)
 
-
 # TAB 3 – Heatmap σ × reserves
 with tab3:
     st.subheader("Depeg Probability Heatmap (σ × reserves)")
@@ -864,13 +1048,22 @@ with tab3:
             sorted(grid_df["trade_fraction"].unique()),
             format_func=lambda x: f"{x*100:.1f}%",
         )
-        threshold_cols = [
-            c for c in grid_df.columns if c.startswith("p_T<")
+
+        severity_cols = [
+            "expected_shortfall",
+            "conditional_shortfall",
+            "time_under_peg",
+            "worst_case_deviation",
         ]
-        threshold_choice = st.selectbox(
-            "Depeg threshold",
-            threshold_cols,
-            index=1 if "p_T<0.95" in threshold_cols else 0,
+
+        metric_options = [
+            c for c in grid_df.columns if c.startswith("p_T<")
+        ] + [c for c in severity_cols if c in grid_df.columns]
+
+        metric_choice = st.selectbox(
+            "Metric to display",
+            metric_options,
+            index=1 if "p_T<0.95" in metric_options else 0,
         )
 
         dfh = grid_df[
@@ -886,7 +1079,7 @@ with tab3:
             for j, s in enumerate(sigmas):
                 val = dfh[
                     (dfh["reserves"] == R) & (dfh["sigma"] == s)
-                ][threshold_choice].mean()
+                ][metric_choice].mean()
                 Z[i, j] = val
 
         fig5, ax5 = plt.subplots(figsize=(7, 5))
@@ -898,7 +1091,7 @@ with tab3:
             aspect="auto",
         )
         cbar = fig5.colorbar(im, ax=ax5)
-        cbar.set_label(f"Depeg Probability ({threshold_choice})")
+        cbar.set_label(f"Metric value ({metric_choice})")
         ax5.set_xlabel("Volatility σ")
         ax5.set_ylabel("Reserves")
         ax5.set_title(
