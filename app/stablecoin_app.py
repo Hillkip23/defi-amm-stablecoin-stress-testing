@@ -454,6 +454,7 @@ if run_clicked:
         "Crab (flat, very high vol)": dict(mu=0.0, sigma=sigma * 2.0, fee_apr=fee_apr),
     }
 
+
     stress_rows = []
     for name, params in scenarios.items():
         _, stress_summary = run_mc_block(
@@ -484,13 +485,19 @@ if run_clicked:
 
     stress_df = pd.DataFrame(stress_rows)
     st.write(stress_df)
+    
 
     fig_stress, ax_stress = plt.subplots()
     ax_stress.bar(stress_df["scenario"], stress_df["mean_lp_over_hodl"])
     ax_stress.set_ylabel("Mean LP / HODL at T")
     ax_stress.grid(True, axis="y")
-    st.pyplot(fig_stress)
+    # Make x-axis labels clearer
+    plt.setp(ax_stress.get_xticklabels(), rotation=20, ha="right", fontsize=9)
+    fig_stress.tight_layout()
 
+    st.pyplot(fig_stress)
+    
+    
     # Single-path visualizer
     st.subheader("Single Path Visualizer")
 
