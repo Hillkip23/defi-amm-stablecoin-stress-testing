@@ -36,9 +36,12 @@ Key elements:
 
 ### 1. AMM & LP Simulation Engine
 
-- GBM process \( dP_t = \mu P_t dt + \sigma_t P_t dW_t \) with volatility calibrated from rolling realised volatility and multiple data sources (ETH, BTC, UNI, XRP, S&P 500, CSV uploads).  
+- GBM process \( dP_t = \mu P_t dt + \sigma_t P_t dW_t \) with volatility calibrated from rolling realised volatility and multiple data sources (ETH, BTC, UNI, XRP, S&P 500, CSV uploads)... dPt=μPtdt+σtPtdWt
+ 
 - Constant‑product AMM with slippage  
-  \( xy = k, \ \text{slippage} = (P_{\text{exec}} - P_{\text{mid}})/P_{\text{mid}} \).  
+  xy = k, \ \text{slippage} = (P_{\text{exec}} - P_{\text{mid}})/P_{\text{mid}} \).
+  constant = xy=k
+  slippage= (y/xy).(−Δx/(x(x+Δx))= −Δx/(x+Δx)
 - LP performance vs HODL including:
   - Impermanent loss  
   - Static fee APR and volatility‑linked dynamic fees  
