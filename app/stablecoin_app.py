@@ -24,7 +24,7 @@ from defi_risk.amm_pricing import (
     slippage_vs_trade_fraction,
 )
 from defi_risk.peg_models import PEG_MODEL_LABELS, simulate_peg_paths
-from defi_risk.peg_stress import depeg_probabilities, depeg_severity_metrics
+from defi_risk.peg_stress import depeg_probabilities
 from defi_risk.stablecoin import (
     simulate_mean_reverting_peg,
     slippage_curve,

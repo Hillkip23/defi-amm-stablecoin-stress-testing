@@ -9,7 +9,9 @@ sys.path.append(str(PROJECT_ROOT))
 
 import matplotlib.pyplot as plt
 
-from src.peg_models import simulate_ou_peg_paths
+from defi_risk.peg_models import simulate_ou_peg_paths
+
+
 
 # --------------------------------------------------
 # Output directory
