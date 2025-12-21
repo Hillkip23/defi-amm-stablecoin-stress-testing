@@ -1,4 +1,5 @@
-# src/peg_stress.py
+# defi_risk/peg_stress.py
+
 from typing import Dict, Iterable, Optional
 
 import numpy as np
@@ -30,7 +31,7 @@ def depeg_probabilities(
 
 
 # -----------------------------------------------------------
-# 1b) Depeg severity metrics over full paths
+# 1b) Depeg severity metrics over full paths (aggregated)
 # -----------------------------------------------------------
 def depeg_severity_metrics(
     prices: pd.DataFrame,
@@ -39,61 +40,39 @@ def depeg_severity_metrics(
     """
     Compute severity metrics for depegs relative to a single threshold θ.
 
-    Inputs
-    ------
-    prices : DataFrame (n_steps, n_paths)
-        Simulated peg paths, one column per path.
-    threshold : float
-        Peg threshold θ (e.g. 0.99 or 1.00).
-
-    Returns
-    -------
-    dict with keys:
+    Returns an aggregated dict with keys:
         - expected_shortfall          : E[(θ - p_T)^+]
         - conditional_shortfall       : E[θ - p_T | p_T < θ]
         - time_under_peg              : fraction of time p_t < θ (averaged over paths)
         - worst_case_deviation        : min_t p_t (over all times, all paths)
         - depeg_probability           : P(p_T < θ)
     """
-    # Convert to ndarray (T, N)
-    if isinstance(prices, pd.DataFrame):
-        arr = prices.values
-    else:
-        arr = np.asarray(prices)
+    arr = prices.values if isinstance(prices, pd.DataFrame) else np.asarray(prices)
 
     if arr.ndim != 2 or arr.size == 0:
         return {
             "expected_shortfall": 0.0,
             "conditional_shortfall": 0.0,
             "time_under_peg": 0.0,
-            "worst_case_deviation": threshold,
+            "worst_case_deviation": float(threshold),
             "depeg_probability": 0.0,
         }
 
-    T, N = arr.shape
+    _, n_paths = arr.shape
 
-    # Terminal prices p_T
-    p_T = arr[-1, :]  # (N,)
+    p_T = arr[-1, :]
     depeg_mask_T = p_T < threshold
-    depeg_prob = float(depeg_mask_T.mean()) if N > 0 else 0.0
+    depeg_prob = float(depeg_mask_T.mean()) if n_paths > 0 else 0.0
 
-    # Expected shortfall E[(θ - p_T)^+]
     shortfall_T = np.maximum(threshold - p_T, 0.0)
-    expected_shortfall = float(shortfall_T.mean()) if N > 0 else 0.0
+    expected_shortfall = float(shortfall_T.mean()) if n_paths > 0 else 0.0
 
-    # Conditional shortfall E[θ - p_T | p_T < θ]
-    if depeg_prob > 0.0:
-        conditional_shortfall = float(shortfall_T[depeg_mask_T].mean())
-    else:
-        conditional_shortfall = 0.0
+    conditional_shortfall = float(shortfall_T[depeg_mask_T].mean()) if depeg_prob > 0.0 else 0.0
 
-    # Time under peg: 1/T ∫ 1_{p_t < θ} dt, approximated discretely
-    below = arr < threshold  # (T, N)
-    # mean over time then over paths = fraction of time under peg, averaged across paths
-    time_under_peg = float(below.mean(axis=0).mean()) if N > 0 else 0.0
+    below = arr < threshold
+    time_under_peg = float(below.mean(axis=0).mean()) if n_paths > 0 else 0.0
 
-    # Worst-case deviation: min_t p_t over all times and paths
-    worst_case_deviation = float(arr.min()) if N > 0 else threshold
+    worst_case_deviation = float(arr.min()) if n_paths > 0 else float(threshold)
 
     return {
         "expected_shortfall": expected_shortfall,
@@ -102,6 +81,43 @@ def depeg_severity_metrics(
         "worst_case_deviation": worst_case_deviation,
         "depeg_probability": depeg_prob,
     }
+
+
+# -----------------------------------------------------------
+# 1c) Per-path severity metrics (for distributions / CIs)
+# -----------------------------------------------------------
+def depeg_severity_per_path(
+    prices: pd.DataFrame,
+    threshold: float = 0.99,
+) -> pd.DataFrame:
+    """
+    Compute per-path severity metrics.
+
+    Returns a DataFrame with one row per path:
+      - p_T
+      - depeg_T (0/1)
+      - shortfall_T = (θ - p_T)^+
+      - time_under_peg (fraction of time below θ)
+      - worst_case_deviation (min over t for that path)
+    """
+    arr = prices.values if isinstance(prices, pd.DataFrame) else np.asarray(prices)
+    if arr.ndim != 2 or arr.size == 0:
+        return pd.DataFrame()
+
+    p_T = arr[-1, :]
+    shortfall_T = np.maximum(threshold - p_T, 0.0)
+    time_under = (arr < threshold).mean(axis=0)
+    worst_case = arr.min(axis=0)
+
+    return pd.DataFrame(
+        {
+            "p_T": p_T,
+            "depeg_T": (p_T < threshold).astype(float),
+            "shortfall_T": shortfall_T,
+            "time_under_peg": time_under,
+            "worst_case_deviation": worst_case,
+        }
+    )
 
 
 # -----------------------------------------------------------
@@ -141,6 +157,9 @@ def run_peg_liquidity_scenario(
     delta_x = trade_fraction * x_reserve
     slippage = slippage_from_trade(x_reserve, y_reserve, delta_x)
 
+    # Optional: also return aggregated severity at 0.99 by default
+    severity = depeg_severity_metrics(prices, threshold=0.99)
+
     return {
         "kappa": float(kappa),
         "sigma": float(sigma),
@@ -149,4 +168,5 @@ def run_peg_liquidity_scenario(
         "trade_fraction": float(trade_fraction),
         "ou_probs": ou_probs,
         "slippage": float(slippage),
+        "severity_0p99": severity,
     }
