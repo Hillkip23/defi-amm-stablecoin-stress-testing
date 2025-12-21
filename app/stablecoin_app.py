@@ -22,7 +22,8 @@ import streamlit as st
 # ============================
 from defi_risk.simulation import (
     simulate_gbm_price_paths,
-    compute_lp_vs_hodl_path,   # ⬅️ removed compute_lp_vs_hodl_summary here
+    compute_lp_vs_hodl_summary,
+    compute_lp_vs_hodl_path,
 )
 from defi_risk.amm_pricing import (
     lp_over_hodl_univ3,
@@ -35,33 +36,6 @@ from defi_risk.dune_client import (
     get_uniswap_eth_usdc_daily_prices,
     get_usdc_daily_prices,
 )
-
-# =====================================================
-# Local LP summary helper (replaces imported version)
-# =====================================================
-def compute_lp_vs_hodl_summary(prices: pd.DataFrame, fee_apr: float) -> pd.DataFrame:
-    """
-    Simple LP vs HODL summary at horizon, path by path.
-    """
-    p_T = prices.iloc[-1, :].astype(float).values
-    p0 = float(prices.iloc[0, 0])
-    rel_move = p_T / p0 - 1.0
-
-    hodl = p_T / p0
-    il = -(rel_move ** 2)
-    lp = (1.0 + fee_apr) * (1.0 + il)
-    lp_over_hodl = lp / hodl
-
-    return pd.DataFrame(
-        {
-            "price": p_T,
-            "hodl": hodl,
-            "lp": lp,
-            "impermanent_loss": il,
-            "lp_over_hodl": lp_over_hodl,
-        }
-    )
-
 
 # =====================================================
 # Helpers for calibration
@@ -680,12 +654,9 @@ with tab1:
             jump_std=jump_std,
         )
 
-        # 2. Standard depeg probabilities
         ou_probs = peg_stress.depeg_probabilities(
             prices_peg, thresholds=(0.99, 0.95, 0.90)
         )
-
-        # 3. Full severity metrics at chosen θ
         severity_results = peg_stress.depeg_severity_metrics(
             prices_peg, threshold=severity_threshold
         )
