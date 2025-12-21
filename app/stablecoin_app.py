@@ -85,7 +85,6 @@ def load_price_series(source, max_years: int = 5) -> pd.Series:
     df = df.set_index("date")
     return df["close"]
 
-
 def estimate_gbm_params(prices: pd.Series, trading_days: int = 252):
     """
     Estimate GBM drift and vol from a price series.
@@ -100,7 +99,6 @@ def estimate_gbm_params(prices: pd.Series, trading_days: int = 252):
     sigma_annual = sigma_daily * np.sqrt(trading_days)
 
     return mu_annual, sigma_annual, log_ret
-
 
 def calibrate_ou_from_usdc_prices(prices: pd.Series) -> dict:
     """
@@ -583,19 +581,33 @@ with tab1:
 
         seed_peg = 42
 
+        # --- USDC (Dune) calibration ---
         st.markdown("#### Calibrate from USDC on-chain prices (Dune)")
-        if st.button("Use USDC (Dune) for OU parameters", key="usdc_calib_btn"):
+        usdc_msg = st.empty()
+
+        def apply_usdc_ou_params(params: dict):
+            st.session_state["peg_kappa"] = float(params["kappa"])
+            st.session_state["peg_sigma"] = float(params["sigma"])
+            st.session_state["peg_p0"] = float(params["mu"])
+            st.session_state["usdc_ou_applied"] = True
+
+        def _run_usdc_calib():
             try:
                 usdc_prices = get_usdc_daily_prices_cached()
                 params = calibrate_ou_from_usdc_prices(usdc_prices)
-                st.session_state["peg_kappa"] = params["kappa"]
-                st.session_state["peg_sigma"] = params["sigma"]
-                st.session_state["peg_p0"] = params["mu"]
-                st.success(
-                    f"Calibrated from USDC: μ≈{params['mu']:.4f}, σ≈{params['sigma']:.4f}, κ≈{params['kappa']:.2f}"
+                apply_usdc_ou_params(params)
+                usdc_msg.success(
+                    f"Calibrated from USDC: μ≈{params['mu']:.4f}, "
+                    f"σ≈{params['sigma']:.4f}, κ≈{params['kappa']:.2f}"
                 )
             except Exception as e:
-                st.error(f"USDC calibration failed: {e}")
+                usdc_msg.error(f"USDC calibration failed: {e}")
+
+        st.button(
+            "Use USDC (Dune) for OU parameters",
+            key="usdc_calib_btn",
+            on_click=_run_usdc_calib,
+        )
 
         severity_threshold = st.slider(
             "Severity Threshold (θ)",
@@ -811,6 +823,9 @@ with tab2:
     st.pyplot(fig4)
 
     st.dataframe(sigma_df)
+
+
+
 
 # TAB 3 – Heatmap σ × reserves
 with tab3:
