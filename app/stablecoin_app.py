@@ -410,4 +410,102 @@ with tab1:
                     st.error(f"Calibration failed: {e}")
     
     with c2:
-        res_stable = st.number_input("Stable reserve", 100_
+        res_stable = st.number_input("Stable reserve", 100_000.0, 100_000_000.0, 10_000_000.0)
+        res_collateral = st.number_input("Collateral reserve", 100_000.0, 100_000_000.0, 10_000_000.0)
+        max_trade = st.slider("Max trade %", 1.0, 50.0, 20.0)
+    
+    if st.button("Run Stablecoin Scenario"):
+        with st.spinner("Simulating..."):
+            prices_peg = simulate_peg_paths(
+                model=model, n_paths=n_paths_peg, n_steps=n_steps_peg, T=T_peg,
+                kappa=kappa_peg, sigma=sigma_peg, p0=p0_peg, peg=1.0, random_seed=42
+            )
+        
+        probs = depeg_probabilities(prices_peg, thresholds=(0.99, 0.95, 0.90))
+        
+        c1, c2 = st.columns(2)
+        with c1:
+            fig, ax = plt.subplots()
+            ax.plot(prices_peg.iloc[:, :min(50, n_paths_peg)], alpha=0.3)
+            ax.axhline(1.0, color='black', linestyle='--')
+            ax.set_title("Sample Peg Paths")
+            st.pyplot(fig)
+            
+            fig, ax = plt.subplots()
+            ax.hist(prices_peg.iloc[-1, :], bins=40, alpha=0.7)
+            ax.axvline(1.0, color='black', linestyle='--')
+            ax.set_title("Terminal Price Distribution")
+            st.pyplot(fig)
+        
+        with c2:
+            st.subheader("Depeg Probabilities")
+            for thr in [0.99, 0.95, 0.90]:
+                st.write(f"P(price < {thr}) = {probs.get(f'p_T<{thr}', 0)*100:.2f}%")
+            
+            # Slippage curve
+            fractions = np.linspace(0.01, max_trade/100, 25)
+            slip_df = slippage_vs_trade_fraction(res_stable, res_collateral, fractions)
+            
+            fig, ax = plt.subplots()
+            ax.plot(slip_df["fraction"]*100, slip_df["slippage"]*100, marker='o')
+            ax.set_xlabel("Trade size (% of reserves)")
+            ax.set_ylabel("Slippage (%)")
+            ax.grid(True)
+            st.pyplot(fig)
+
+with tab2:
+    st.subheader("Depeg Probability vs Volatility")
+    kappa_fixed = st.slider("Fixed κ", 0.1, 10.0, 5.0, key="curve_kappa")
+    sigma_min = st.number_input("Min σ", 0.001, 0.5, 0.01, step=0.001)
+    sigma_max = st.number_input("Max σ", 0.001, 0.5, 0.05, step=0.001)
+    n_sigma = st.slider("Points", 3, 20, 10)
+    
+    if sigma_min < sigma_max and st.button("Generate Curve"):
+        sigmas = np.linspace(sigma_min, sigma_max, n_sigma)
+        rows = []
+        progress = st.progress(0)
+        
+        for i, s in enumerate(sigmas):
+            prices = simulate_peg_paths("basic_ou", 2000, 252, 1.0, kappa_fixed, s, 1.0, 1.0, 123)
+            probs = depeg_probabilities(prices, (0.99, 0.95, 0.90))
+            rows.append({"sigma": s, **probs})
+            progress.progress((i+1)/len(sigmas))
+        
+        df = pd.DataFrame(rows)
+        fig, ax = plt.subplots()
+        for col in ["p_T<0.99", "p_T<0.95", "p_T<0.90"]:
+            if col in df.columns:
+                ax.plot(df["sigma"], df[col], marker='o', label=col)
+        ax.set_xlabel("σ")
+        ax.set_ylabel("Depeg Probability")
+        ax.legend()
+        ax.grid(True)
+        st.pyplot(fig)
+        st.write(df)
+
+with tab3:
+    st.subheader("σ × Reserves Heatmap")
+    grid_df = load_grid_csv()
+    if grid_df is None:
+        st.warning("Run `python experiments/run_peg_stress_grid.py` to generate grid data")
+    else:
+        kappa_sel = st.selectbox("Select κ", sorted(grid_df["kappa"].unique()))
+        trade_sel = st.selectbox("Trade fraction", sorted(grid_df["trade_fraction"].unique()),
+                                format_func=lambda x: f"{x*100:.0f}%")
+        thresh_sel = st.selectbox("Threshold", [c for c in grid_df.columns if c.startswith("p_T<")])
+        
+        dfh = grid_df[(grid_df["kappa"] == kappa_sel) & (grid_df["trade_fraction"] == trade_sel)]
+        if not dfh.empty:
+            sigmas = sorted(dfh["sigma"].unique())
+            reserves = sorted(dfh["reserves"].unique())
+            Z = np.array([[dfh[(dfh["sigma"]==s) & (dfh["reserves"]==r)][thresh_sel].mean() 
+                          for s in sigmas] for r in reserves])
+            
+            fig, ax = plt.subplots(figsize=(8, 6))
+            im = ax.imshow(Z, origin="lower", cmap="viridis", aspect="auto",
+                          extent=[min(sigmas), max(sigmas), min(reserves), max(reserves)])
+            plt.colorbar(im, ax=ax, label=f"P({thresh_sel})")
+            ax.set_xlabel("σ")
+            ax.set_ylabel("Reserves")
+            ax.set_title(f"Depeg Probability Heatmap (κ={kappa_sel})")
+            st.pyplot(fig)
