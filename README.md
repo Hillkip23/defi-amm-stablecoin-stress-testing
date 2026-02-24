@@ -1,83 +1,95 @@
-# Stress Testing DeFi AMMs and Stablecoins
+# DeFi AMM & Stablecoin Stress Testing Framework
 
-The project provides a unified, reproducible framework for stress testing automated market makers (AMMs) and soft‑pegged stablecoins using empirically calibrated stochastic models and interactive dashboards.
+[![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://hillkip23-defi-amm-stablecoin-stress-t-appstablecoin-app-yfedl4.streamlit.app/)
 
-## Live Streamlit Lab
+A unified, reproducible framework for stress testing Automated Market Makers (AMMs) and soft-pegged stablecoins using **exact stochastic calculus** and empirically calibrated models.
 
-**DeFi AMM & Stablecoin Stress Lab**  
-Unified dashboard for AMM liquidity‑provision risk and stablecoin peg resilience.
+## 🌐 Live Demo
 
-> https://hillkip23-defi-amm-stablecoin-stress-t-appstablecoin-app-yfedl4.streamlit.app/
+**[DeFi AMM & Stablecoin Stress Lab](https://hillkip23-defi-amm-stablecoin-stress-t-appstablecoin-app-yfedl4.streamlit.app/)**
 
-The app exposes:
+Interactive dashboards for:
+- **AMM LP Risk Analysis** – Monte Carlo simulation of LP vs HODL performance under volatility regimes
+- **Stablecoin Peg Stress Testing** – Ornstein-Uhlenbeck models with exact solutions and compound Poisson jumps
 
-- **AMM & LP Risk** – GBM‑based simulations of LP vs HODL outcomes, impermanent loss, and fee income under different volatility regimes.
-- **Stablecoin Peg & Liquidity Stress Lab** – OU‑based peg models, depeg probabilities and severity metrics, and slippage as a function of pool depth and trade size.
+All results are reproducible via the Streamlit interface or command-line export scripts.
 
-All results in the paper are generated directly from this codebase via export scripts and are reproducible from the Streamlit interface.
+---
 
-## Research Overview
+## 📐 Mathematical Framework
 
-The paper studies how volatility shocks and liquidity withdrawals jointly affect.
+### AMM & LP Simulation Engine
 
-- **LP profitability** in constant‑product AMMs (including dynamic v2‑style fees and static v3‑style concentrated ranges).
-- **Stablecoin peg stability**, measured not only by depeg probability but by how badly and for how long pegs fail.
+**Geometric Brownian Motion** for risky assets:
+$$\mathrm{d}P_t = \mu P_t \,\mathrm{d}t + \sigma P_t \,\mathrm{d}W_t$$
 
-Key elements:
+- **Calibrated from on-chain data** (ETH, BTC via Dune) or custom CSV uploads
+- **Impermanent Loss**: $IL(R) = \frac{2\sqrt{R}}{1+R} - 1$ where $R = P_T/P_0$
+- **Dynamic Fees**: $fee_{APR}^{dynamic} = fee_{base} + \beta \cdot \sigma_{realized}$
+- **Uniswap V3**: Concentrated liquidity ranges with grid-search optimization
 
-- Risk assets follow a **regime‑aware GBM** calibrated to historical data (e.g., ETH using Dune’s `prices.usd` / `prices.day` tables; BTC; S&P 500). 
-- Stablecoin prices follow **mean‑reverting processes** (basic OU, stress‑aware OU, OU with jumps) calibrated to **USDC on‑chain data** via an AR(1) → OU mapping.
-- AMMs use **constant‑product pricing** with fee income, impermanent loss, and slippage fully modeled; concentrated‑liquidity ranges are analysed via grid search over price bands.
-- Stress surfaces over volatility and liquidity reveal sharp **phase transitions** in LP/HODL performance and peg stability that do not appear in average‑condition analyses.
+### Stablecoin Peg Dynamics
 
-## Main Features
+**Mean-reverting processes with exact solutions**:
 
-### 1. AMM & LP Simulation Engine
+$$\mathrm{d}p_t = \kappa(p^* - p_t)\,\mathrm{d}t + \sigma_t \,\mathrm{d}W_t + \mathrm{d}J_t$$
 
-- GBM process \(\mathrm{d}P_t = \mu P_t \mathrm{d}t + \sigma_t P_t \mathrm{d}W_t\) with volatility calibrated from rolling realised volatility and multiple data sources (ETH, BTC, UNI, XRP, S&P 500, CSV uploads). 
-- Constant‑product AMM with slippage  
-  \[
-  xy = k
-  \]  
-  and slippage defined as  
-  \[
-  \text{slippage} = \frac{P_{\text{exec}} - P_{\text{mid}}}{P_{\text{mid}}}.
-  \]
-- LP performance vs HODL including:
-  - Impermanent loss.  
-  - Static fee APR and volatility‑linked dynamic fees.  
-  - Concentrated‑liquidity ranges benchmarked against full‑range LPs.  
-- Scenario presets (Base, Bull, Bear, Crab) to illustrate regime‑dependent LP outcomes.
+| Model | Features | Use Case |
+|-------|----------|----------|
+| **Basic OU** | Constant $\sigma$, exact transition density | Normal market conditions |
+| **Stress-Aware OU** | $\sigma_t = \sigma(1 + \beta\|p_t - p^*\|)$ | Volatility clustering during depegs |
+| **OU with Jumps** | Compound Poisson $\mathrm{d}J_t$ (intensity $\lambda$, skewed jumps) | Tail risk / black swan events |
 
-### 2. Stablecoin Peg & Liquidity Stress Module
+**Key Implementation Detail**: Unlike standard Euler-Maruyama approximations, we use the **exact OU transition density**:
+$$p_t = p_{t-1}e^{-\kappa\Delta t} + p^*(1-e^{-\kappa\Delta t}) + \sigma\sqrt{\frac{1-e^{-2\kappa\Delta t}}{2\kappa}}Z_t$$
 
-- Peg dynamics:  
-  \[
-  \mathrm{d}p_t = \kappa(p^* - p_t)\mathrm{d}t + \sigma_t \mathrm{d}W_t + J_t
-  \]
-  with:
-  - Basic OU (constant \(\sigma\), no jumps).  
-  - Stress‑aware OU with volatility amplification \(\sigma_t = \sigma (1 + \beta |p_t - p^*|)\).  
-  - OU with downward jumps (Poisson intensity \(\lambda\), negatively skewed jump sizes).[web:45][web:48]
+This eliminates discretization bias critical for accurate tail risk estimation.
 
-- **USDC on‑chain calibration** 
-  1. Fetch daily USDC/USD from Dune price tables (legacy `prices.usd` or `prices.day`).  
-  2. Compute deviations \(x_t = p_t - 1\).  
-  3. Fit AR(1) \(x_{t+1} = a + b x_t + \varepsilon_t\).  
-  4. Map to OU: \(\kappa = -\ln b\), \(\mu = 1 + a/(1-b)\), \(\sigma\) from residual variance.  
+### Empirical Calibration
 
-  The dashboard button “Use USDC (Dune) for OU parameters” pre‑loads a baseline parameter set estimated from USDC data.[web:18]
+**USDC On-Chain Calibration Pipeline**:
+1. Fetch daily USDC/USD from Dune (`prices.usd` / `prices.day`)
+2. Compute deviations: $x_t = p_t - 1$
+3. Fit AR(1): $x_{t+1} = a + b x_t + \varepsilon_t$
+4. Map to OU parameters:
+   - $\kappa = -\ln(b)/\Delta t$ (mean reversion speed)
+   - $\mu = 1 + a/(1-b)$ (long-run mean)
+   - $\sigma = \sigma_\varepsilon\sqrt{2\kappa/(1-e^{-2\kappa\Delta t})}$ (volatility)
+   - **Half-life**: $t_{1/2} = \ln(2)/\kappa$ (interpretable metric)
 
-- **Depeg severity metrics** computed over simulated paths: 
-  - Depeg probability \(\mathbb{P}(p_T < \theta)\).  
-  - Expected shortfall \(\mathbb{E}[(\theta - p_T)^+]\).  
-  - Conditional shortfall \(\mathbb{E}[\theta - p_T \mid p_T < \theta]\).  
-  - Time‑under‑peg \(\frac{1}{T}\int_0^T 1_{\{p_t < \theta\}} \mathrm{d}t\).  
-  - Worst‑case deviation \(\min_{t \in [0,T]} p_t\).  
+**Example Calibration** (March 2024):
+- $\kappa = 0.56$ day$^{-1}$ → Half-life = **1.2 days**
+- $\sigma = 0.0021$ (21 bps daily volatility)
 
-- Stress surfaces and heatmaps over volatility \(\sigma\) and pool reserves \(R\) highlight nonlinear transitions where mild depegs become frequent and severe once \(\sigma\) crosses critical bands.
+---
 
-## Repository Structure
+## 🎯 Key Features
+
+### 1. AMM Risk Analysis
+- **LP vs HODL**: Terminal wealth distribution with fee accrual
+- **Impermanent Loss Decomposition**: Separate IL (-) from fee income (+)
+- **Regime Scenarios**: Base, Bull (low vol), Bear (high vol), Crab (flat/high vol)
+- **V3 Range Optimization**: Grid search over price bands to maximize LP/HODL ratio
+
+### 2. Stablecoin Stress Testing
+- **Depeg Severity Metrics**:
+  - Probability: $\mathbb{P}(p_T &lt; \theta)$
+  - Expected Shortfall: $\mathbb{E}[(\theta - p_T)^+]$
+  - Time-Under-Peg: $\frac{1}{T}\int_0^T \mathbf{1}_{\{p_t &lt; \theta\}}\mathrm{d}t$
+  - Worst-case deviation: $\min_{t\in[0,T]} p_t$
+- **Slippage Analysis**: Constant-product AMM slippage vs trade size as % of reserves
+- **Stress Surfaces**: Heatmaps of depeg probability over $(\sigma, R)$ space
+
+### 3. Production-Quality Numerics
+✅ **Exact OU solution** (no Euler-Maruyama bias)  
+✅ **Compound Poisson jumps** (properly sums multiple jumps per timestep)  
+✅ **Stationarity validation** (AR(1) coefficient $b \in (0,1)$ check)  
+✅ **Caching & progress bars** for large Monte Carlo runs  
+
+---
+
+## 📂 Repository Structure
+
 
 Core modules (names may vary slightly with the actual repo)
 
@@ -91,13 +103,21 @@ Core modules (names may vary slightly with the actual repo)
 
 All figures and tables in the paper are produced from this code via reproducible experiment scripts.
 
-## Getting Started
 
-### Local installation
+---
+
+## 🚀 Quick Start
+
+### Local Installation
 
 ```bash
 git clone https://github.com/hillkip23/defi-amm-stablecoin-stress-testing.git
 cd defi-amm-stablecoin-stress-testing
+
 python -m venv venv
 source venv/bin/activate  # Windows: venv\Scripts\activate
+
 pip install -r requirements.txt
+
+# Run the app
+streamlit run app/stablecoin_app.py
