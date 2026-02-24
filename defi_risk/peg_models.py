@@ -25,11 +25,28 @@ def simulate_ou_peg_paths(
     peg: float = 1.0,
     random_seed: Optional[int] = None,
 ) -> pd.DataFrame:
+    """
+    Simulate OU process using EXACT transition density (no discretization error).
+    
+    dp_t = kappa(peg - p_t)dt + sigma*dW_t
+    
+    Exact solution:
+    p_t = p_{t-1}*e^{-kappa*dt} + peg*(1-e^{-kappa*dt}) + sigma*sqrt((1-e^{-2*kappa*dt})/(2*kappa))*Z_t
+    """
     if random_seed is not None:
         np.random.seed(random_seed)
 
     dt = T / n_steps
     times = _make_time_grid(n_steps, T)
+    
+    # Precompute OU transition parameters for exact solution
+    exp_kappa_dt = np.exp(-kappa * dt)
+    mean_reversion_term = peg * (1.0 - exp_kappa_dt)
+    if kappa > 1e-8:
+        vol_scale = sigma * np.sqrt((1.0 - np.exp(-2.0 * kappa * dt)) / (2.0 * kappa))
+    else:
+        # Fallback to Euler-Maruyama diffusion scaling if kappa is near zero (Brownian motion)
+        vol_scale = sigma * np.sqrt(dt)
 
     prices = np.zeros((n_steps + 1, n_paths), dtype=float)
     prices[0, :] = p0
@@ -37,11 +54,9 @@ def simulate_ou_peg_paths(
     for t in range(1, n_steps + 1):
         z = np.random.normal(size=n_paths)
         prev = prices[t - 1, :]
-
-        drift = kappa * (peg - prev) * dt
-        diffusion = sigma * np.sqrt(dt) * z
-
-        prices[t, :] = prev + drift + diffusion
+        
+        # Exact OU transition
+        prices[t, :] = prev * exp_kappa_dt + mean_reversion_term + vol_scale * z
 
     df = pd.DataFrame(prices, index=times)
     df.index.name = "time"
@@ -60,6 +75,14 @@ def simulate_stress_aware_ou_paths(
     peg: float = 1.0,
     random_seed: Optional[int] = None,
 ) -> pd.DataFrame:
+    """
+    Stress-aware OU where mean reversion weakens and volatility increases with depeg severity.
+    
+    kappa_eff = kappa / (1 + alpha_kappa * |p - peg|)
+    sigma_eff = sigma * (1 + beta_sigma * |p - peg|)
+    
+    Uses Euler-Maruyama (required due to state-dependent coefficients).
+    """
     if random_seed is not None:
         np.random.seed(random_seed)
 
@@ -101,11 +124,29 @@ def simulate_ou_with_jumps(
     peg: float = 1.0,
     random_seed: Optional[int] = None,
 ) -> pd.DataFrame:
+    """
+    OU process with compound Poisson jumps.
+    
+    dp_t = kappa(peg - p_t)dt + sigma*dW_t + J_t*dN_t
+    
+    where dN_t is Poisson process with intensity lambda, and J_t ~ N(jump_mean, jump_std^2)
+    are i.i.d. jump sizes (additive).
+    
+    BUG FIX: Properly handles multiple jumps in one time step.
+    """
     if random_seed is not None:
         np.random.seed(random_seed)
 
     dt = T / n_steps
     times = _make_time_grid(n_steps, T)
+    
+    # Precompute OU transition parameters (exact solution for continuous part)
+    exp_kappa_dt = np.exp(-kappa * dt)
+    mean_reversion_term = peg * (1.0 - exp_kappa_dt)
+    if kappa > 1e-8:
+        vol_scale = sigma * np.sqrt((1.0 - np.exp(-2.0 * kappa * dt)) / (2.0 * kappa))
+    else:
+        vol_scale = sigma * np.sqrt(dt)
 
     prices = np.zeros((n_steps + 1, n_paths), dtype=float)
     prices[0, :] = p0
@@ -113,19 +154,38 @@ def simulate_ou_with_jumps(
     for t in range(1, n_steps + 1):
         z = np.random.normal(size=n_paths)
         prev = prices[t - 1, :]
-
-        drift = kappa * (peg - prev) * dt
-        diffusion = sigma * np.sqrt(dt) * z
-
+        
+        # Continuous OU component (exact)
+        cont_part = prev * exp_kappa_dt + mean_reversion_term + vol_scale * z
+        
+        # Jump component (compound Poisson)
+        # Number of jumps in this time step for each path
         n_jumps = np.random.poisson(lam=jump_intensity * dt, size=n_paths)
-        jump_shocks = np.where(
-            n_jumps > 0,
-            np.random.normal(loc=jump_mean, scale=jump_std, size=n_paths),
-            0.0,
-        )
-
-        new_price = prev + drift + diffusion + jump_shocks
-        prices[t, :] = np.clip(new_price, 0.1, None)
+        
+        # Calculate total jump shock for each path
+        # Vectorized approach: for paths with n_jumps > 0, sum n_jumps i.i.d. normals
+        jump_shocks = np.zeros(n_paths)
+        
+        # Handle paths with jumps
+        jump_mask = n_jumps > 0
+        if np.any(jump_mask):
+            max_jumps = int(n_jumps.max())
+            # For each potential jump count, add appropriate random shocks
+            for j in range(1, max_jumps + 1):
+                # Paths that have at least j jumps
+                mask = n_jumps >= j
+                if np.any(mask):
+                    jump_shocks[mask] += np.random.normal(
+                        loc=jump_mean, 
+                        scale=jump_std, 
+                        size=np.sum(mask)
+                    )
+        
+        new_price = cont_part + jump_shocks
+        
+        # Ensure price stays positive (reflecting boundary or absorption)
+        # Using soft floor to avoid numerical issues
+        prices[t, :] = np.maximum(new_price, 0.01)
 
     df = pd.DataFrame(prices, index=times)
     df.index.name = "time"
