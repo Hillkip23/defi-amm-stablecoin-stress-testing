@@ -77,10 +77,6 @@ def simulate_stress_aware_ou_paths(
 ) -> pd.DataFrame:
     """
     Stress-aware OU where mean reversion weakens and volatility increases with depeg severity.
-    
-    kappa_eff = kappa / (1 + alpha_kappa * |p - peg|)
-    sigma_eff = sigma * (1 + beta_sigma * |p - peg|)
-    
     Uses Euler-Maruyama (required due to state-dependent coefficients).
     """
     if random_seed is not None:
@@ -125,14 +121,9 @@ def simulate_ou_with_jumps(
     random_seed: Optional[int] = None,
 ) -> pd.DataFrame:
     """
-    OU process with compound Poisson jumps.
+    OU process with compound Poisson jumps (additive).
     
-    dp_t = kappa(peg - p_t)dt + sigma*dW_t + J_t*dN_t
-    
-    where dN_t is Poisson process with intensity lambda, and J_t ~ N(jump_mean, jump_std^2)
-    are i.i.d. jump sizes (additive).
-    
-    BUG FIX: Properly handles multiple jumps in one time step.
+    BUG FIX: Properly handles multiple jumps in one time step by summing jump shocks.
     """
     if random_seed is not None:
         np.random.seed(random_seed)
@@ -158,34 +149,24 @@ def simulate_ou_with_jumps(
         # Continuous OU component (exact)
         cont_part = prev * exp_kappa_dt + mean_reversion_term + vol_scale * z
         
-        # Jump component (compound Poisson)
-        # Number of jumps in this time step for each path
+        # Jump component (compound Poisson) - FIXED
         n_jumps = np.random.poisson(lam=jump_intensity * dt, size=n_paths)
-        
-        # Calculate total jump shock for each path
-        # Vectorized approach: for paths with n_jumps > 0, sum n_jumps i.i.d. normals
         jump_shocks = np.zeros(n_paths)
         
-        # Handle paths with jumps
+        # Vectorized accumulation of jumps
         jump_mask = n_jumps > 0
         if np.any(jump_mask):
             max_jumps = int(n_jumps.max())
-            # For each potential jump count, add appropriate random shocks
             for j in range(1, max_jumps + 1):
-                # Paths that have at least j jumps
+                # Paths with at least j jumps get another shock
                 mask = n_jumps >= j
                 if np.any(mask):
                     jump_shocks[mask] += np.random.normal(
-                        loc=jump_mean, 
-                        scale=jump_std, 
-                        size=np.sum(mask)
+                        loc=jump_mean, scale=jump_std, size=np.sum(mask)
                     )
         
         new_price = cont_part + jump_shocks
-        
-        # Ensure price stays positive (reflecting boundary or absorption)
-        # Using soft floor to avoid numerical issues
-        prices[t, :] = np.maximum(new_price, 0.01)
+        prices[t, :] = np.maximum(new_price, 0.01)  # Soft floor
 
     df = pd.DataFrame(prices, index=times)
     df.index.name = "time"
@@ -210,51 +191,26 @@ def simulate_peg_paths(
 ) -> pd.DataFrame:
     if model == "basic_ou":
         return simulate_ou_peg_paths(
-            n_paths=n_paths,
-            n_steps=n_steps,
-            T=T,
-            kappa=kappa,
-            sigma=sigma,
-            p0=p0,
-            peg=peg,
-            random_seed=random_seed,
+            n_paths=n_paths, n_steps=n_steps, T=T, kappa=kappa, sigma=sigma,
+            p0=p0, peg=peg, random_seed=random_seed,
         )
     elif model == "stress_ou":
         return simulate_stress_aware_ou_paths(
-            n_paths=n_paths,
-            n_steps=n_steps,
-            T=T,
-            kappa=kappa,
-            sigma=sigma,
-            alpha_kappa=alpha_kappa,
-            beta_sigma=beta_sigma,
-            p0=p0,
-            peg=peg,
+            n_paths=n_paths, n_steps=n_steps, T=T, kappa=kappa, sigma=sigma,
+            alpha_kappa=alpha_kappa, beta_sigma=beta_sigma, p0=p0, peg=peg,
             random_seed=random_seed,
         )
     elif model == "ou_jumps":
         return simulate_ou_with_jumps(
-            n_paths=n_paths,
-            n_steps=n_steps,
-            T=T,
-            kappa=kappa,
-            sigma=sigma,
-            jump_intensity=jump_intensity,
-            jump_mean=jump_mean,
-            jump_std=jump_std,
-            p0=p0,
-            peg=peg,
-            random_seed=random_seed,
+            n_paths=n_paths, n_steps=n_steps, T=T, kappa=kappa, sigma=sigma,
+            jump_intensity=jump_intensity, jump_mean=jump_mean, jump_std=jump_std,
+            p0=p0, peg=peg, random_seed=random_seed,
         )
     else:
         raise ValueError(f"Unknown peg model: {model}")
 
 
 __all__ = [
-    "PegModelName",
-    "PEG_MODEL_LABELS",
-    "simulate_ou_peg_paths",
-    "simulate_stress_aware_ou_paths",
-    "simulate_ou_with_jumps",
-    "simulate_peg_paths",
+    "PegModelName", "PEG_MODEL_LABELS", "simulate_ou_peg_paths",
+    "simulate_stress_aware_ou_paths", "simulate_ou_with_jumps", "simulate_peg_paths",
 ]
