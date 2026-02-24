@@ -100,11 +100,12 @@ def estimate_gbm_params(prices: pd.Series, trading_days: int = 252):
 
     return mu_annual, sigma_annual, log_ret
 
-# OU calibration from USDC peg series using AR(1) → OU mapping.[web:181][web:200]
+# OU calibration from USDC peg series using AR(1) → OU mapping.
 def calibrate_ou_from_usdc_prices(prices: pd.Series) -> dict:
     """
     Estimate OU parameters (mu, sigma, kappa) from a USDC price series around 1.
-    Treat deviations from 1 as an AR(1) and map to continuous-time OU.[web:187]
+    Treat deviations from 1 as an AR(1) and map to continuous-time OU.
+    Includes validation for stationarity.
     """
     x = prices.dropna().astype(float).values - 1.0
     if len(x) < 2:
@@ -115,20 +116,45 @@ def calibrate_ou_from_usdc_prices(prices: pd.Series) -> dict:
     x_tp1 = x[1:]
 
     # AR(1): x_{t+1} = a + b x_t + eps
-    b = np.sum(x_t * x_tp1) / np.sum(x_t * x_t)
+    # Add small epsilon to denominator to avoid division by zero
+    denominator = np.sum(x_t * x_t)
+    if denominator < 1e-12:
+        return {"mu": 1.0, "sigma": 0.01, "kappa": 1.0}
+        
+    b = np.sum(x_t * x_tp1) / denominator
     a = np.mean(x_tp1 - b * x_t)
     residuals = x_tp1 - (a + b * x_t)
     sigma_eps = np.std(residuals, ddof=1)
 
-    # Map AR(1) to OU parameters: κ, μ, σ.[web:181][web:200]
-    kappa = -np.log(b) / dt if 0.0 < b < 1.0 else 1.0
+    # Validate stationarity: b must be in (0, 1) for mean-reverting OU
+    if not (0 < b < 1):
+        # Fallback to neutral parameters if non-stationary
+        return {
+            "mu": float(1.0 + np.mean(x)), 
+            "sigma": float(np.std(x)), 
+            "kappa": 1.0,
+            "stationary": False,
+            "ar_coeff": float(b)
+        }
+
+    # Map AR(1) to OU parameters: κ, μ, σ
+    kappa = -np.log(b) / dt
     mu_dev = a / (1.0 - b) if abs(1.0 - b) > 1e-6 else 0.0
     mu = 1.0 + mu_dev
-    sigma = sigma_eps * np.sqrt(
-        2.0 * kappa / (1.0 - np.exp(-2.0 * kappa * dt))
-    )
+    
+    # Variance scaling factor for exact OU discretization
+    if kappa > 0:
+        sigma = sigma_eps * np.sqrt(2.0 * kappa / (1.0 - np.exp(-2.0 * kappa * dt)))
+    else:
+        sigma = sigma_eps
 
-    return {"mu": float(mu), "sigma": float(sigma), "kappa": float(kappa)}
+    return {
+        "mu": float(mu), 
+        "sigma": float(sigma), 
+        "kappa": float(kappa),
+        "stationary": True,
+        "half_life_days": float(np.log(2) / kappa) if kappa > 0 else float('inf')
+    }
 
 # =====================================================
 # Page config
@@ -138,12 +164,10 @@ st.set_page_config(
     layout="wide",
 )
 
-# Initialize GBM slider state before widgets
-if "mu_slider" not in st.session_state:
-    st.session_state.mu_slider = 0.0
-
-if "sigma_slider" not in st.session_state:
-    st.session_state.sigma_slider = 0.8
+# Initialize GBM slider state before widgets - more robust initialization
+for key, val in [("mu_slider", 0.0), ("sigma_slider", 0.8), ("calibration_applied", False)]:
+    if key not in st.session_state:
+        st.session_state[key] = val
 
 st.title("DeFi AMM & Stablecoin Stress Lab")
 st.markdown(
@@ -207,6 +231,7 @@ p_upper = st.sidebar.slider("Upper bound", 1.0, 5.0, 1.2)
 # =====================================================
 # Helper: run one Monte Carlo block and return (prices, summary_df)
 # =====================================================
+@st.cache_data(ttl=300)  # Cache for 5 minutes to improve performance
 def run_mc_block(n_paths, n_steps, T, mu, sigma, fee_apr, p0=1.0, random_seed=42):
     prices = simulate_gbm_price_paths(
         n_paths=n_paths,
@@ -273,6 +298,7 @@ if run_clicked:
 
     summary_df["realized_vol"] = realized_vols
 
+    # Ensure fee sensitivity uses consistent units (realized vol as decimal)
     dynamic_fee_apr = fee_apr + fee_sensitivity * summary_df["realized_vol"]
     dynamic_fee_apr = dynamic_fee_apr.clip(lower=0.0, upper=1.0)
     summary_df["dynamic_fee_apr"] = dynamic_fee_apr
@@ -285,22 +311,6 @@ if run_clicked:
         percentiles=[0.05, 0.25, 0.5, 0.75, 0.95]
     )
     st.write(lp_dyn_stats)
-
-    st.subheader("Return Decomposition (Dynamic Fees vs HODL)")
-    total_excess = summary_df["lp_over_hodl_dynamic"] - 1.0
-    il_component = summary_df["impermanent_loss"]
-    fee_component = dynamic_fee_apr * T
-
-    decomp = pd.DataFrame(
-        {
-            "mean_component": [
-                il_component.mean(),
-                fee_component.mean(),
-                total_excess.mean(),
-            ]
-        },
-        index=["IL (negative)", "Fee income", "Total LP excess return"],
-    )
 
     st.subheader("Return Decomposition (Dynamic Fees vs HODL)")
     total_excess = summary_df["lp_over_hodl_dynamic"] - 1.0
@@ -334,8 +344,6 @@ if run_clicked:
     ax_decomp.grid(True, axis="y")
     st.pyplot(fig_decomp)
 
-
-
     st.subheader("Histogram of LP / HODL with Dynamic Fees (v2)")
     fig_dyn, ax_dyn = plt.subplots()
     ax_dyn.hist(summary_df["lp_over_hodl_dynamic"], bins=50)
@@ -345,6 +353,8 @@ if run_clicked:
     st.pyplot(fig_dyn)
 
     # B & E) Uniswap v3 concentrated LP vs HODL + range search
+    # NOTE: This is a simplified calculation based on terminal price only.
+    # Full v3 modeling requires path-dependent fee accrual.
     summary_df["lp_over_hodl_v3"] = summary_df["price"].apply(
         lambda p: lp_over_hodl_univ3(p, p_lower=p_lower, p_upper=p_upper)
     )
@@ -388,9 +398,15 @@ if run_clicked:
         prices_T = summary_df["price"].values
         results = []
 
+        # Progress indicator for grid search
+        progress_bar = st.progress(0)
+        total_calcs = len(lowers) * len(uppers)
+        calc_count = 0
+
         for L in lowers:
             for U in uppers:
                 if L >= U:
+                    calc_count += 1
                     continue
                 vals = [lp_over_hodl_univ3(p, p_lower=L, p_upper=U) for p in prices_T]
                 mean_val = np.mean(vals)
@@ -400,6 +416,8 @@ if run_clicked:
                 if mean_val > best_mean:
                     best_mean = mean_val
                     best_range = (L, U)
+                calc_count += 1
+                progress_bar.progress(min(calc_count / total_calcs, 1.0))
 
         opt_df = pd.DataFrame(results).sort_values(
             "mean_lp_over_hodl", ascending=False
@@ -700,6 +718,7 @@ Use the tabs below to explore:
 """
 )
 
+@st.cache_data(ttl=600)
 def load_grid_csv():
     csv_path = DATA_DIR / "peg_liquidity_grid.csv"
     if not csv_path.exists():
@@ -741,18 +760,24 @@ with tab1:
         peg_target = 1.0
         seed_peg = 42
 
-        # Calibrate from USDC on-chain prices via Dune prices.usd.[web:168][web:129]
+        # Calibrate from USDC on-chain prices via Dune prices.usd
         st.markdown("#### Calibrate from USDC on-chain prices (Dune)")
         if st.button("Use USDC (Dune) for OU parameters", key="usdc_calib_btn"):
             try:
-                usdc_prices = get_usdc_daily_prices()
+                with st.spinner("Fetching USDC prices from Dune..."):
+                    usdc_prices = get_usdc_daily_prices()
                 params = calibrate_ou_from_usdc_prices(usdc_prices)
-                kappa_peg = params["kappa"]
-                sigma_peg = params["sigma"]
-                p0_peg = params["mu"]
-                st.success(
-                    f"Calibrated from USDC: μ≈{p0_peg:.4f}, σ≈{sigma_peg:.4f}, κ≈{kappa_peg:.2f}"
-                )
+                
+                if not params.get("stationary", True):
+                    st.warning(
+                        f"⚠️ Non-stationary AR(1) coefficient (b={params['ar_coeff']:.3f}). "
+                        "Using neutral parameters. Check data quality."
+                    )
+                else:
+                    st.success(
+                        f"Calibrated from USDC: μ≈{params['mu']:.4f}, σ≈{params['sigma']:.4f}, "
+                        f"κ≈{params['kappa']:.2f} (half-life: {params['half_life_days']:.1f} days)"
+                    )
             except Exception as e:
                 st.error(f"USDC calibration failed: {e}")
 
@@ -790,22 +815,23 @@ with tab1:
     run_peg = st.button("Run stablecoin scenario")
 
     if run_peg:
-        prices_peg = simulate_peg_paths(
-            model=peg_model_key,
-            n_paths=n_paths_peg,
-            n_steps=n_steps_peg,
-            T=T_peg,
-            kappa=kappa_peg,
-            sigma=sigma_peg,
-            p0=p0_peg,
-            peg=peg_target,
-            random_seed=seed_peg,
-            alpha_kappa=1.0,
-            beta_sigma=3.0,
-            jump_intensity=0.2,
-            jump_mean=-0.05,
-            jump_std=0.03,
-        )
+        with st.spinner(f"Simulating {n_paths_peg} OU paths..."):
+            prices_peg = simulate_peg_paths(
+                model=peg_model_key,
+                n_paths=n_paths_peg,
+                n_steps=n_steps_peg,
+                T=T_peg,
+                kappa=kappa_peg,
+                sigma=sigma_peg,
+                p0=p0_peg,
+                peg=peg_target,
+                random_seed=seed_peg,
+                alpha_kappa=1.0,
+                beta_sigma=3.0,
+                jump_intensity=0.2,
+                jump_mean=-0.05,
+                jump_std=0.03,
+            )
 
         ou_probs = depeg_probabilities(
             prices_peg, thresholds=(0.99, 0.95, 0.90)
@@ -893,41 +919,47 @@ with tab2:
         "Max σ", value=0.05, step=0.005, format="%.3f", key="curve_sigma_max"
     )
 
-    sigma_grid = np.linspace(sigma_min, sigma_max, n_sigma)
-    rows = []
-    for s in sigma_grid:
-        prices_s = simulate_peg_paths(
-            model="basic_ou",
-            n_paths=n_paths_peg,
-            n_steps=n_steps_peg,
-            T=T_peg,
-            kappa=kappa_fixed,
-            sigma=float(s),
-            p0=p0_fixed,
-            peg=peg_target,
-            random_seed=123,
-        )
-        probs_s = depeg_probabilities(
-            prices_s, thresholds=(0.99, 0.95, 0.90)
-        )
-        row = {"sigma": float(s)}
-        row.update(probs_s)
-        rows.append(row)
+    if sigma_min >= sigma_max:
+        st.error("Min σ must be less than Max σ")
+    else:
+        sigma_grid = np.linspace(sigma_min, sigma_max, n_sigma)
+        rows = []
+        
+        progress_bar = st.progress(0)
+        for idx, s in enumerate(sigma_grid):
+            prices_s = simulate_peg_paths(
+                model="basic_ou",
+                n_paths=n_paths_peg,
+                n_steps=n_steps_peg,
+                T=T_peg,
+                kappa=kappa_fixed,
+                sigma=float(s),
+                p0=p0_fixed,
+                peg=peg_target,
+                random_seed=123,
+            )
+            probs_s = depeg_probabilities(
+                prices_s, thresholds=(0.99, 0.95, 0.90)
+            )
+            row = {"sigma": float(s)}
+            row.update(probs_s)
+            rows.append(row)
+            progress_bar.progress((idx + 1) / len(sigma_grid))
 
-    sigma_df = pd.DataFrame(rows)
+        sigma_df = pd.DataFrame(rows)
 
-    fig4, ax4 = plt.subplots()
-    for col in ["p_T<0.99", "p_T<0.95", "p_T<0.90"]:
-        if col in sigma_df.columns:
-            ax4.plot(sigma_df["sigma"], sigma_df[col], marker="o", label=col)
-    ax4.set_xlabel("Volatility σ")
-    ax4.set_ylabel("Depeg Probability")
-    ax4.set_title(f"Depeg Probability vs σ (κ={kappa_fixed})")
-    ax4.grid(True)
-    ax4.legend()
-    st.pyplot(fig4)
+        fig4, ax4 = plt.subplots()
+        for col in ["p_T<0.99", "p_T<0.95", "p_T<0.90"]:
+            if col in sigma_df.columns:
+                ax4.plot(sigma_df["sigma"], sigma_df[col], marker="o", label=col)
+        ax4.set_xlabel("Volatility σ")
+        ax4.set_ylabel("Depeg Probability")
+        ax4.set_title(f"Depeg Probability vs σ (κ={kappa_fixed})")
+        ax4.grid(True)
+        ax4.legend()
+        st.pyplot(fig4)
 
-    st.dataframe(sigma_df)
+        st.dataframe(sigma_df)
 
 # TAB 3 – Heatmap σ × reserves
 with tab3:
@@ -965,41 +997,43 @@ with tab3:
             & (grid_df["trade_fraction"] == trade_fraction_choice)
         ]
         
-        st.download_button(
-            "Download heatmap grid as CSV",
-            dfh.to_csv(index=False).encode("utf-8"),
-            file_name=f"peg_heatmap_kappa{float(kappa_choice)}_trade{int(trade_fraction_choice*100)}pct.csv",
-            mime="text/csv",
-        )
+        if not dfh.empty:
+            st.download_button(
+                "Download heatmap grid as CSV",
+                dfh.to_csv(index=False).encode("utf-8"),
+                file_name=f"peg_heatmap_kappa{float(kappa_choice)}_trade{int(trade_fraction_choice*100)}pct.csv",
+                mime="text/csv",
+            )
 
-        sigmas = sorted(dfh["sigma"].unique())
-        reserves = sorted(dfh["reserves"].unique())
-        Z = np.zeros((len(reserves), len(sigmas)))
+            sigmas = sorted(dfh["sigma"].unique())
+            reserves = sorted(dfh["reserves"].unique())
+            Z = np.zeros((len(reserves), len(sigmas)))
 
-        for i, R in enumerate(reserves):
-            for j, s in enumerate(sigmas):
-                val = dfh[
-                    (dfh["reserves"] == R) & (dfh["sigma"] == s)
-                ][threshold_choice].mean()
-                Z[i, j] = val
+            for i, R in enumerate(reserves):
+                for j, s in enumerate(sigmas):
+                    val = dfh[
+                        (dfh["reserves"] == R) & (dfh["sigma"] == s)
+                    ][threshold_choice].mean()
+                    Z[i, j] = val
 
-        fig5, ax5 = plt.subplots(figsize=(7, 5))
-        im = ax5.imshow(
-            Z,
-            origin="lower",
-            cmap="viridis",
-            extent=[min(sigmas), max(sigmas), min(reserves), max(reserves)],
-            aspect="auto",
-        )
-        cbar = fig5.colorbar(im, ax=ax5)
-        cbar.set_label(f"Depeg Probability ({threshold_choice})")
-        ax5.set_xlabel("Volatility σ")
-        ax5.set_ylabel("Reserves")
-        ax5.set_title(
-            f"σ × Reserves Heatmap (κ={kappa_choice}, trade={trade_fraction_choice*100:.1f}%)"
-        )
-        st.pyplot(fig5)
+            fig5, ax5 = plt.subplots(figsize=(7, 5))
+            im = ax5.imshow(
+                Z,
+                origin="lower",
+                cmap="viridis",
+                extent=[min(sigmas), max(sigmas), min(reserves), max(reserves)],
+                aspect="auto",
+            )
+            cbar = fig5.colorbar(im, ax=ax5)
+            cbar.set_label(f"Depeg Probability ({threshold_choice})")
+            ax5.set_xlabel("Volatility σ")
+            ax5.set_ylabel("Reserves")
+            ax5.set_title(
+                f"σ × Reserves Heatmap (κ={kappa_choice}, trade={trade_fraction_choice*100:.1f}%)"
+            )
+            st.pyplot(fig5)
 
-        st.markdown("Underlying grid data:")
-        st.dataframe(dfh.reset_index(drop=True))
-
+            st.markdown("Underlying grid data:")
+            st.dataframe(dfh.reset_index(drop=True))
+        else:
+            st.warning("No data available for the selected parameters.")
